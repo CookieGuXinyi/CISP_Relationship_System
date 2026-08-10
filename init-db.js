@@ -26,6 +26,7 @@ db.serialize(() => {
             full_expression TEXT,
             expression_type TEXT,
             source_role TEXT DEFAULT 'direct',
+            filter_cond TEXT,
             job_id TEXT,
             report_code TEXT DEFAULT 'Y4',
             layer TEXT,
@@ -114,6 +115,15 @@ db.serialize(() => {
 //     insertRule.run(row.rule_id, row.rule_name, row.layer, row.target_field, row.rule_sql, row.threshold, row.owner);
 // });
 // insertRule.finalize();
+
+// 迁移：为已有数据库补加 filter_cond 列（CREATE TABLE 中已定义，此处针对旧库）
+db.run("ALTER TABLE field_lineage ADD COLUMN filter_cond TEXT", (err) => {
+    if (err && !String(err.message).includes('duplicate column')) {
+        console.warn('⚠️  filter_cond 列迁移失败:', err.message);
+    } else {
+        console.log('✅ filter_cond 列已就绪');
+    }
+});
 
 db.close(() => {
     console.log('✅ 数据库初始化完成');

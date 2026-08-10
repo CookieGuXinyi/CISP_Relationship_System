@@ -622,6 +622,14 @@ class SQLBloodlineParser:
                             existing[col_key] = col_val
                 else:
                     alias_columns['__table_aliases__'] = scoped_table_aliases
+                    own_fc = self._extract_select_clauses(inner_select)
+                    nested_filters = self._collect_subquery_filters_for_select(inner_select)
+                    if own_fc or nested_filters:
+                        complete_fc = own_fc if own_fc else {"group_by": [], "where": None, "having": None}
+                        if nested_filters:
+                            complete_fc = dict(complete_fc)
+                            complete_fc["subquery_filters"] = nested_filters
+                        alias_columns['__filter_cond__'] = complete_fc
                     self.column_alias_map[sq_alias] = alias_columns
     
     def _get_from_aliases_for_select(self, select):
@@ -814,7 +822,116 @@ class SQLBloodlineParser:
         elif isinstance(node, exp.Select):
             self._extract_columns_from_select(node, target_table)
     
+    def _resolve_aliases_in_expr(self, expr_sql, select):
+        """将表达式中的表别名解析为物理表名，如 'x.period' → 'base_app_cisp.dwd_branch_info.period'"""
+        if not expr_sql:
+            return expr_sql
+        table_aliases = self._collect_table_aliases_for_select(select)
+        if not table_aliases:
+            return expr_sql
+        def replace_alias(match):
+            alias = match.group(1)
+            col = match.group(2)
+            alias_lower = alias.lower()
+            if alias_lower in table_aliases:
+                return f"{table_aliases[alias_lower]}.{col}"
+            return match.group(0)
+        return re.sub(r'"?(\w+)"?\."?(\w+)"?', replace_alias, expr_sql)
+
+    def _extract_select_clauses(self, select):
+        """提取 SELECT 语句的 GROUP BY / WHERE / HAVING 子句，返回 dict。
+        返回值形如：
+          {"group_by": ["branch_code","sec_type"], "where": "base_app_cisp.dwd_branch_info.period = '...'", "having": null}
+        若三者均无，返回 None。
+        """
+        try:
+            group_by = []
+            where_sql = None
+            having_sql = None
+
+            group = select.args.get('group')
+            if group is not None:
+                for gexpr in group.expressions:
+                    try:
+                        g_sql = self._clean_expression(gexpr.sql())
+                        g_sql = self._resolve_aliases_in_expr(g_sql, select)
+                        group_by.append(g_sql)
+                    except Exception:
+                        group_by.append(gexpr.sql())
+
+            where = select.args.get('where')
+            if where is not None and where.this is not None:
+                try:
+                    where_sql = self._clean_expression(where.this.sql())
+                    where_sql = self._resolve_aliases_in_expr(where_sql, select)
+                except Exception:
+                    where_sql = where.this.sql()
+
+            having = select.args.get('having')
+            if having is not None and having.this is not None:
+                try:
+                    having_sql = self._clean_expression(having.this.sql())
+                    having_sql = self._resolve_aliases_in_expr(having_sql, select)
+                except Exception:
+                    having_sql = having.this.sql()
+
+            if not group_by and where_sql is None and having_sql is None:
+                return None
+
+            return {
+                "group_by": group_by if group_by else [],
+                "where": where_sql,
+                "having": having_sql
+            }
+        except Exception:
+            return None
+
+    def _collect_subquery_filters(self, expr_str):
+        if not expr_str:
+            return []
+        filters = []
+        seen = set()
+        for match in re.finditer(r'"?(\w+)"?\."?(\w+)"?', expr_str):
+            alias = match.group(1).lower()
+            if alias in seen or alias not in self.column_alias_map:
+                continue
+            seen.add(alias)
+            fc = self.column_alias_map[alias].get('__filter_cond__')
+            if not fc:
+                continue
+            filters.append({
+                "alias": alias,
+                "group_by": fc.get("group_by", []),
+                "where": fc.get("where"),
+                "having": fc.get("having")
+            })
+            for nf in fc.get('subquery_filters', []):
+                nf_alias = nf.get('alias')
+                if nf_alias and nf_alias not in seen:
+                    seen.add(nf_alias)
+                    filters.append(nf)
+        return filters
+
+    def _collect_subquery_filters_for_select(self, select):
+        parts = []
+        for sel_expr in select.expressions:
+            try:
+                parts.append(sel_expr.sql())
+            except Exception:
+                pass
+        return self._collect_subquery_filters(' '.join(parts))
+
+    def _build_filter_cond_json(self, current_fc, subq_filters):
+        if not current_fc and not subq_filters:
+            return None
+        fc = current_fc if current_fc else {"group_by": [], "where": None, "having": None}
+        if subq_filters:
+            fc = dict(fc)
+            fc["subquery_filters"] = subq_filters
+        return json.dumps(fc, ensure_ascii=False)
+
     def _extract_columns_from_select(self, select, target_table):
+        current_fc = self._extract_select_clauses(select)
         for expr in select.expressions:
             if isinstance(expr, exp.Alias):
                 alias = expr.alias_or_name
@@ -825,6 +942,8 @@ class SQLBloodlineParser:
                 full_expr_sql = self._simplify_coalesce(full_expr_sql)
                 simplified = self._get_simplified_expression(expr.this)
                 expr_type = self._classify_expression_type(full_expr_sql, expr.this)
+                subq_filters = self._collect_subquery_filters(raw_expr_sql)
+                filter_cond = self._build_filter_cond_json(current_fc, subq_filters)
                 
                 for col in source_cols:
                     self.column_lineage.append({
@@ -835,7 +954,8 @@ class SQLBloodlineParser:
                         "expression": simplified,
                         "full_expression": full_expr_sql,
                         "expression_type": expr_type,
-                        "source_role": col.get('role', 'direct')
+                        "source_role": col.get('role', 'direct'),
+                        "filter_cond": filter_cond
                     })
             elif isinstance(expr, exp.Column):
                 col_name = expr.name
@@ -845,6 +965,8 @@ class SQLBloodlineParser:
                 full_expr_sql = self._substitute_expression(raw_expr_sql)
                 full_expr_sql = self._simplify_coalesce(full_expr_sql)
                 expr_type = self._classify_expression_type(full_expr_sql, expr)
+                subq_filters = self._collect_subquery_filters(raw_expr_sql)
+                filter_cond = self._build_filter_cond_json(current_fc, subq_filters)
                 
                 for col in source_cols:
                     self.column_lineage.append({
@@ -855,7 +977,8 @@ class SQLBloodlineParser:
                         "expression": col_name,
                         "full_expression": full_expr_sql,
                         "expression_type": expr_type,
-                        "source_role": col.get('role', 'direct')
+                        "source_role": col.get('role', 'direct'),
+                        "filter_cond": filter_cond
                     })
     
     def _classify_expression_type(self, full_expr_sql, original_expr):

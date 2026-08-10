@@ -134,6 +134,7 @@ function extractLineage(parsed, jobName, reportCode) {
             full_expression: item.full_expression || item.expression || '直接映射',
             expression_type: item.expression_type || 'direct',
             source_role: item.source_role || 'direct',
+            filter_cond: item.filter_cond || null,
             job_id: jobName || 'manual',
             report_code: reportCode || 'Y4',
             layer: inferLayer(targetTable)
@@ -156,6 +157,7 @@ function extractLineage(parsed, jobName, reportCode) {
             expression: 'TABLE_DEPENDENCY',
             expression_type: 'TABLE_DEPENDENCY',
             source_role: 'table_level',
+            filter_cond: null,
             job_id: jobName || 'manual',
             report_code: reportCode || 'Y4',
             layer: inferLayer(target)
@@ -185,8 +187,8 @@ function saveLineage(lineageData, callback, fallbackJobId) {
             
             const stmt = db.prepare(`
                 INSERT INTO field_lineage 
-                (source_table, target_table, source_field, target_field, expression, full_expression, expression_type, source_role, job_id, report_code, layer)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (source_table, target_table, source_field, target_field, expression, full_expression, expression_type, source_role, filter_cond, job_id, report_code, layer)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
             
             lineageData.forEach(row => {
@@ -199,6 +201,7 @@ function saveLineage(lineageData, callback, fallbackJobId) {
                     row.full_expression || row.expression || '直接映射',
                     row.expression_type || 'direct',
                     row.source_role || 'direct',
+                    row.filter_cond || null,
                     row.job_id || fallbackJobId || 'manual',
                     row.report_code || 'Y4',
                     row.layer || 'UNKNOWN'

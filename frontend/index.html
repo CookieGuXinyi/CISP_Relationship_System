@@ -375,6 +375,7 @@
                 <th>类型</th>
                 <th>角色</th>
                 <th>表达式</th>
+                <th>筛选条件</th>
               </tr>
             </thead>
             <tbody>
@@ -388,6 +389,40 @@
                   <span :style="getRoleStyle(item.source_role)">{{ getRoleLabel(item.source_role) }}</span>
                 </td>
                 <td style="color: #909399; font-size: 12px; max-width: 400px; word-break: break-all;">{{ item.full_expression || item.expression || '直接映射' }}</td>
+                <td style="font-size: 11px; max-width: 320px; vertical-align: top;">
+                  <div v-if="parseFilterCond(item.filter_cond)">
+                    <div v-if="parseFilterCond(item.filter_cond).group_by.length" style="margin-bottom: 4px;">
+                      <span style="color: #1890ff; font-weight: 500;">分组:</span>
+                      <span style="color: #606266;">{{ parseFilterCond(item.filter_cond).group_by.join(', ') }}</span>
+                    </div>
+                    <div v-if="parseFilterCond(item.filter_cond).where" style="margin-bottom: 4px;">
+                      <span style="color: #fa8c16; font-weight: 500;">WHERE:</span>
+                      <span style="color: #606266; word-break: break-all;">{{ parseFilterCond(item.filter_cond).where }}</span>
+                    </div>
+                    <div v-if="parseFilterCond(item.filter_cond).having" style="margin-bottom: 4px;">
+                      <span style="color: #722ed1; font-weight: 500;">HAVING:</span>
+                      <span style="color: #606266; word-break: break-all;">{{ parseFilterCond(item.filter_cond).having }}</span>
+                    </div>
+                    <div v-if="parseFilterCond(item.filter_cond).subquery_filters && parseFilterCond(item.filter_cond).subquery_filters.length">
+                      <div v-for="(sq, sqi) in parseFilterCond(item.filter_cond).subquery_filters" :key="sqi" style="margin-top: 6px; padding: 6px 8px; background: #fafafa; border-left: 3px solid #1890ff; border-radius: 3px;">
+                        <div style="font-weight: 600; color: #1890ff; margin-bottom: 3px;">子查询 [{{ sq.alias }}]</div>
+                        <div v-if="sq.group_by && sq.group_by.length" style="margin-bottom: 2px;">
+                          <span style="color: #1890ff;">分组:</span>
+                          <span style="color: #606266;">{{ sq.group_by.join(', ') }}</span>
+                        </div>
+                        <div v-if="sq.where" style="margin-bottom: 2px;">
+                          <span style="color: #fa8c16;">WHERE:</span>
+                          <span style="color: #606266; word-break: break-all;">{{ sq.where }}</span>
+                        </div>
+                        <div v-if="sq.having">
+                          <span style="color: #722ed1;">HAVING:</span>
+                          <span style="color: #606266; word-break: break-all;">{{ sq.having }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <span v-else style="color: #c0c4cc;">-</span>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -785,6 +820,29 @@
             'table_level': '表级依赖'
           };
           return map[role] || role || '未知';
+        };
+
+        // 解析 filter_cond JSON 字符串，带缓存避免重复解析
+        const filterCondCache = new Map();
+        const parseFilterCond = (condStr) => {
+          if (!condStr) return null;
+          if (filterCondCache.has(condStr)) return filterCondCache.get(condStr);
+          let result = null;
+          try {
+            const obj = typeof condStr === 'string' ? JSON.parse(condStr) : condStr;
+            if (obj && (obj.group_by?.length || obj.where || obj.having || (obj.subquery_filters && obj.subquery_filters.length))) {
+              result = {
+                group_by: Array.isArray(obj.group_by) ? obj.group_by : [],
+                where: obj.where || null,
+                having: obj.having || null,
+                subquery_filters: Array.isArray(obj.subquery_filters) ? obj.subquery_filters : []
+              };
+            }
+          } catch (e) {
+            result = null;
+          }
+          filterCondCache.set(condStr, result);
+          return result;
         };
 
         const getRoleStyle = (role) => {
@@ -1626,6 +1684,7 @@
           getExprTypeStyle,
           getRoleLabel,
           getRoleStyle,
+          parseFilterCond,
           batchProgress,
           batchRunning,
           startBatchAnalyze,
