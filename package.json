@@ -1,0 +1,29 @@
+{
+  "name": "cisp_demo",
+  "version": "1.0.0",
+  "description": "CISP报表血缘质量溯源系统 - Demo版",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "init-db": "node init-db.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "CISP",
+    "数据血缘",
+    "质量溯源",
+    "监管报送"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "pg": "^8.22.0",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

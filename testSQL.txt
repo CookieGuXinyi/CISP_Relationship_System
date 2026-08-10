@@ -1,0 +1,206 @@
+-- task0
+insert overwrite table base_app_cisp.t_branch_y4_fzjgywjgbb_t partition(period)
+select orgcode,
+    nvl(c4_01,0)  c4_01, nvl(d4_01,0)+nvl(lm.d4_01_lm,0) d4_01, nvl(e4_01,0) e4_01, nvl(f4_01,0)+nvl(lm.f4_01_lm,0) f4_01, nvl(g4_01,0) g4_01, 
+    nvl(c4_02,0)  c4_02, nvl(d4_02,0)+nvl(lm.d4_02_lm,0) d4_02, nvl(e4_02,0) e4_02, nvl(f4_02,0)+nvl(lm.f4_02_lm,0) f4_02, nvl(g4_02,0) g4_02, 
+    nvl(c4_03,0)  c4_03, nvl(d4_03,0)+nvl(lm.d4_03_lm,0) d4_03, nvl(e4_03,0) e4_03, nvl(f4_03,0)+nvl(lm.f4_03_lm,0) f4_03, nvl(g4_03,0) g4_03, 
+    nvl(c4_04,0)  c4_04, nvl(d4_04,0)+nvl(lm.d4_04_lm,0) d4_04, nvl(e4_04,0) e4_04, nvl(f4_04,0)+nvl(lm.f4_04_lm,0) f4_04, nvl(g4_04,0) g4_04, 
+    nvl(c4_05,0)  c4_05, nvl(d4_05,0)+nvl(lm.d4_05_lm,0) d4_05, nvl(e4_05,0) e4_05, nvl(f4_05,0)+nvl(lm.f4_05_lm,0) f4_05, nvl(g4_05,0) g4_05, 
+    nvl(c4_06,0)  c4_06, nvl(d4_06,0)+nvl(lm.d4_06_lm,0) d4_06, nvl(e4_06,0) e4_06, nvl(f4_06,0)+nvl(lm.f4_06_lm,0) f4_06, nvl(g4_06,0) g4_06, 
+    nvl(c4_07,0)  c4_07, nvl(d4_07,0)+nvl(lm.d4_07_lm,0) d4_07, nvl(e4_07,0) e4_07, nvl(f4_07,0)+nvl(lm.f4_07_lm,0) f4_07, nvl(g4_07,0) g4_07, 
+    nvl(c4_08,0)  c4_08, nvl(d4_08,0)+nvl(lm.d4_08_lm,0) d4_08, nvl(e4_08,0) e4_08, nvl(f4_08,0)+nvl(lm.f4_08_lm,0) f4_08, nvl(g4_08,0) g4_08, 
+    nvl(c4_09,0)  c4_09, nvl(d4_09,0)+nvl(lm.d4_09_lm,0) d4_09, nvl(e4_09,0) e4_09, nvl(f4_09,0)+nvl(lm.f4_09_lm,0) f4_09, nvl(g4_09,0) g4_09, 
+    nvl(c4_10,0)  c4_10, nvl(d4_10,0)+nvl(lm.d4_10_lm,0) d4_10, nvl(e4_10,0) e4_10, nvl(f4_10,0)+nvl(lm.f4_10_lm,0) f4_10, nvl(g4_10,0) g4_10, 
+    nvl(c4_11,0)  c4_11, nvl(d4_11,0)+nvl(lm.d4_11_lm,0) d4_11, nvl(e4_11,0) e4_11, nvl(f4_11,0)+nvl(lm.f4_11_lm,0) f4_11, nvl(g4_11,0) g4_11, 
+    nvl(c4_12,0)  c4_12, nvl(d4_12,0)+nvl(lm.d4_12_lm,0) d4_12, nvl(e4_12,0) e4_12, nvl(f4_12,0)+nvl(lm.f4_12_lm,0) f4_12, nvl(g4_12,0) g4_12, 
+    nvl(c4_13,0)  c4_13, nvl(d4_13,0)+nvl(lm.d4_13_lm,0) d4_13, nvl(e4_13,0) e4_13, nvl(f4_13,0)+nvl(lm.f4_13_lm,0) f4_13, nvl(g4_13,0) g4_13, 
+    nvl(c4_14,0)  c4_14, nvl(d4_14,0)+nvl(lm.d4_14_lm,0) d4_14, nvl(e4_14,0) e4_14, nvl(f4_14,0)+nvl(lm.f4_14_lm,0) f4_14, nvl(g4_14,0) g4_14, 
+    nvl(c4_99,0)  c4_99, nvl(d4_99,0)+nvl(lm.d4_99_lm,0) d4_99, nvl(e4_99,0) e4_99, nvl(f4_99,0)+nvl(lm.f4_99_lm,0) f4_99, nvl(g4_99,0) g4_99,
+    nvl(C4_00,0)  C4_00, nvl(D4_00,0)+nvl(lm.d4_00_lm,0) D4_00, nvl(E4_00,0) E4_00, nvl(F4_00,0)+nvl(lm.F4_00_lm,0) F4_00, nvl(G4_00,0) G4_00,
+    nvl(c4_98,0)  c4_98, nvl(d4_98,0)+nvl(lm.d4_98_lm,0)  d4_98, nvl(e4_98,0) e4_98, nvl(f4_98,0)+nvl(lm.F4_98_lm,0)  f4_98, 
+    nvl(C23,cast(0.00000000 as decimal(12,8))) C23, nvl(C24,cast(0.00000000 as decimal(12,8))) C24,
+    '{last_month}'
+from trcif.cif_lborganization x
+left join
+(
+SELECT department_id, 
+    c4_01, c4_01 d4_01, e4_01,e4_01 f4_01, g4_01, 
+    c4_02, c4_02 d4_02, e4_02,e4_02 f4_02, g4_02, 
+    c4_03, c4_03 d4_03, e4_03,e4_03 f4_03, g4_03, 
+    c4_04, c4_04 d4_04, e4_04,e4_04 f4_04, g4_04, 
+    c4_05, c4_05 d4_05, e4_05,e4_05 f4_05, g4_05, 
+    c4_06, c4_06 d4_06, e4_06,e4_06 f4_06, g4_06, 
+    c4_07, c4_07 d4_07, e4_07,e4_07 f4_07, g4_07, 
+    c4_08, c4_08 d4_08, e4_08,e4_08 f4_08, g4_08, 
+    c4_09, c4_09 d4_09, e4_09,e4_09 f4_09, g4_09, 
+    c4_10, c4_10 d4_10, e4_10,e4_10 f4_10, g4_10, 
+    c4_11, c4_11 d4_11, e4_11,e4_11 f4_11, g4_11, 
+    c4_12, c4_12 d4_12, e4_12,e4_12 f4_12, g4_12, 
+    c4_13, c4_13 d4_13, e4_13,e4_13 f4_13, g4_13, 
+    c4_14, c4_14 d4_14, e4_14,e4_14 f4_14, g4_14, 
+    c4_99, c4_99 d4_99, e4_99,e4_99 f4_99, g4_99,
+    c4_01+c4_02+c4_03+c4_04+c4_05+c4_06+c4_07+c4_08+c4_09+c4_10+c4_12+c4_13+c4_14+c4_99 C4_00,
+    c4_01+c4_02+c4_03+c4_04+c4_05+c4_06+c4_07+c4_08+c4_09+c4_10+c4_12+c4_13+c4_14+c4_99 D4_00,
+    e4_01+e4_02+e4_03+e4_04+e4_05+e4_06+e4_07+e4_08+e4_09+e4_10+e4_11+e4_12+e4_13+e4_14+e4_99 E4_00,
+    e4_01+e4_02+e4_03+e4_04+e4_05+e4_06+e4_07+e4_08+e4_09+e4_10+e4_11+e4_12+e4_13+e4_14+e4_99 F4_00,
+    g4_01+g4_02+g4_03+g4_04+g4_05+g4_06+g4_07+g4_08+g4_09+g4_10+g4_11+g4_12+g4_13+g4_14+g4_99 G4_00,
+    c4_98, C4_98 d4_98, e4_98, e4_98 f4_98,nvl(y.ZGYJL,cast(0.00000000 as decimal(12,8))) C23,nvl(y.ZDYJL,cast(0.00000000 as decimal(12,8))) C24, period
+FROM (
+    select branch_code DEPARTMENT_ID,yf PERIOD,
+        --A股主板股票
+        sum(if (data_sn in (1,2),jy_m,0)) C4_01,
+        sum(if (data_sn in (1,2),jy,0)) D4_01,
+        sum(if (data_sn in (1,2),yj_m,0)) E4_01,
+        sum(if (data_sn in (1,2),yj,0)) F4_01,
+        sum(if (data_sn in (1,2),sz,0)) G4_01,
+        --A股创业板股票
+        sum(if (data_sn in (4,5),jy_m,0)) C4_02,
+        sum(if (data_sn in (4,5),jy,0)) D4_02,
+        sum(if (data_sn in (4,5),yj_m,0)) E4_02,
+        sum(if (data_sn in (4,5),yj,0)) F4_02,
+        sum(if (data_sn in (4,5),sz,0)) G4_02,
+        --A股科创板股票
+        sum(if (data_sn in (7,8),jy_m,0)) C4_03,
+        sum(if (data_sn in (7,8),jy,0)) D4_03,
+        sum(if (data_sn in (7,8),yj_m,0)) E4_03,
+        sum(if (data_sn in (7,8),yj,0)) F4_03,
+        sum(if (data_sn in (7,8),sz,0)) G4_03,
+        --本期交易金额_B股(折人民币)
+        sum(if (data_sn in (10,11),jy_m,0)) C4_04,
+        sum(if (data_sn in (10,11),jy,0)) D4_04,
+        sum(if (data_sn in (10,11),yj_m,0)) E4_04,
+        sum(if (data_sn in (10,11),yj,0)) F4_04,
+        sum(if (data_sn in (10,11),sz,0)) G4_04,
+        --全国中小企业股份转让系统挂牌股票
+        sum(if (data_sn in (13,14),jy_m,0)) C4_05,
+        sum(if (data_sn in (13,14),jy,0))-sum(if (data_sn in (131,141),jy,0)) D4_05,
+        sum(if (data_sn in (13,14),yj_m,0)) E4_05,
+        sum(if (data_sn in (13,14),yj,0))-sum(if (data_sn in (131,141),yj,0)) F4_05,
+        sum(if (data_sn in (13,14),sz,0)) G4_05,
+        --公募基金
+        sum(if (data_sn in (16,17,1901,1902,2001,2002),jy_m,0)) C4_06,
+        sum(if (data_sn in (16,17,1901,1902,2001,2002),jy,0)) D4_06,
+        sum(if (data_sn in (16,17,1901,1902,2001,2002),yj_m,0)) E4_06,
+        sum(if (data_sn in (16,17,1901,1902,2001,2002),yj,0)) F4_06,
+        sum(if (data_sn in (16,17,1901,1902,2001,2002),sz,0)) G4_06,
+        --债券
+        sum(if (data_sn in (21,22),jy_m,0)) C4_07,
+        sum(if (data_sn in (21,22),jy,0)) D4_07,
+        sum(if (data_sn in (21,22),yj_m,0)) E4_07,
+        sum(if (data_sn in (21,22),yj,0)) F4_07,
+        sum(if (data_sn in (21,22),sz,0)) G4_07,
+        --沪港通
+        sum(if (data_sn in (24,25),jy_m,0)) C4_08,
+        sum(if (data_sn in (24,25),jy,0)) D4_08,
+        sum(if (data_sn in (24,25),yj_m,0)) E4_08,
+        sum(if (data_sn in (24,25),yj,0)) F4_08,
+        sum(if (data_sn in (24,25),sz,0)) G4_08,
+        --深港通
+        sum(if (data_sn in (27,28),jy_m,0)) C4_09,
+        sum(if (data_sn in (27,28),jy,0)) D4_09,
+        sum(if (data_sn in (27,28),yj_m,0)) E4_09,
+        sum(if (data_sn in (27,28),yj,0)) F4_09,
+        sum(if (data_sn in (27,28),sz,0)) G4_09,
+        --存托凭证
+        sum(if (data_sn in (30,31),jy_m,0)) C4_10,
+        sum(if (data_sn in (30,31),jy,0)) D4_10,
+        sum(if (data_sn in (30,31),yj_m,0)) E4_10,
+        sum(if (data_sn in (30,31),yj,0)) F4_10,
+        sum(if (data_sn in (30,31),sz,0)) G4_10,
+        --场内期权
+        sum(if (data_sn in (33,34),jy_m,0)) C4_11,
+        sum(if (data_sn in (33,34),jy,0)) D4_11,
+        sum(if (data_sn in (33,34),yj_m,0)) E4_11,
+        sum(if (data_sn in (33,34),yj,0)) F4_11,
+        sum(if (data_sn in (33,34),sz,0)) G4_11,
+        --债券融资回购交易
+        sum(if (data_sn in (36,37),jy_m,0)) C4_12,
+        sum(if (data_sn in (36,37),jy,0)) D4_12,
+        sum(if (data_sn in (36,37),yj_m,0)) E4_12,
+        sum(if (data_sn in (36,37),yj,0)) F4_12,
+        sum(if (data_sn in (36,37,20371),sz,0)) G4_12,
+        --债券融资回购交易
+        sum(if (data_sn in (39,40),jy_m,0)) C4_13,
+        sum(if (data_sn in (39,40),jy,0)) D4_13,
+        sum(if (data_sn in (39,40),yj_m,0)) E4_13,
+        sum(if (data_sn in (39,40),yj,0)) F4_13,
+        sum(if (data_sn in (39,40,20401),sz,0)) G4_13,
+        --北交所股票
+        sum(if (data_sn in (131,141,46,47),jy_m,0)) C4_14,
+        sum(if (data_sn in (131,141,46,47),jy,0)) D4_14,
+        sum(if (data_sn in (131,141,46,47),yj_m,0)) E4_14,
+        sum(if (data_sn in (131,141,46,47),yj,0)) F4_14,
+        sum(if (data_sn in (46,47),sz,0)) G4_14,
+        --其他证券
+        sum(if (data_sn in (42,43),jy_m,0)) C4_99,
+        sum(if (data_sn in (42,43),jy,0)) D4_99,
+        sum(if (data_sn in (42,43),yj_m,0)) E4_99,
+        sum(if (data_sn in (42,43),yj,0)) F4_99,
+        sum(if (data_sn in (42,43),sz,0)) G4_99,
+        --通过网上交易、手机交易
+        sum(if(data_sn in (131,141),0,jy_net_m)) C4_98,
+        sum(if(data_sn in (131,141),0,jy_net)) D4_98,
+        sum(if(data_sn in (131,141),0,yj_net_m)) E4_98,
+        sum(if(data_sn in (131,141),0,yj_net)) F4_98
+    from
+    (
+    SELECT x.MAP_BRANCH_CODE BRANCH_CODE,x.cust_type,x.data_sn,
+        round(sum(jy_m*exchange_rate),2) jy_m,
+        round(sum(jy*exchange_rate),2) jy,
+        round(sum(yj_m*exchange_rate/added_tax_rate),2)  yj_m,
+        round(sum(yj*exchange_rate/added_tax_rate),2)  yj,
+        round(sum(jy_net_m*exchange_rate),2) jy_net_m,
+        round(sum(jy_net*exchange_rate),2) jy_net,
+        round(sum(yj_net_m*exchange_rate/added_tax_rate),2)  yj_net_m,
+        round(sum(yj_net*exchange_rate/added_tax_rate),2)  yj_net,
+        round(sum(sz*exchange_rate),2) sz,'{last_month}' yf
+    from (
+    select cm.*,nvl(tb1.added_tax_rate,1) added_tax_rate,NVL(exchange_rate,1) exchange_rate
+    from (select x.*,y.MAP_BRANCH_CODE from base_app_cisp.t_branch_y4_fzjgywjgbb x, 
+    (select branch_code,if(map_branch_code1 is null,map_branch_code,map_branch_code1) MAP_BRANCH_CODE,MAP_BRANCH_ABBREV,MAP_BRANCH_CODE1 from rmdc.params_tb_branch_map) y  
+    where x.yf='{last_month}' and  x.branch_code=y.branch_code) cm
+    left join 
+    (select * from rmdc.params_tb_branch) tb1
+    on cm.MAP_BRANCH_CODE=tb1.branch_code
+    left join 
+    (select if(bz='HKD',2,if(bz='USD',1,99)) bz,round(exchange_rate/100,4) exchange_rate   from nf.exchange_rate where rq='{last_month_last_trading_day}' and bz in ('HKD','USD')) x
+    on cm.currency_code=x.bz
+    ) x
+    group by x.MAP_BRANCH_CODE,x.cust_type,x.data_sn
+    ) x
+    group by branch_code,yf
+    ) x
+    left join 
+    (
+    select MAP_BRANCH_CODE BRANCH_CODE,cast(min(ZDYJL)/1000 as decimal(12,8)) ZDYJL,cast(max(case when ZGYJL BETWEEN 3 and 3.01 then 3 else ZGYJL end )/1000 as decimal(12,8)) ZGYJL
+    from base_app_cisp.tcispsjbctj x,
+    (select branch_code,if(map_branch_code1 is null,map_branch_code,map_branch_code1) MAP_BRANCH_CODE,MAP_BRANCH_ABBREV,MAP_BRANCH_CODE1 from rmdc.params_tb_branch_map) y
+    where  x.branch_code=y.branch_code
+    and x.tradedate like '{last_month}%' and x.ZDYJL>0   group by y.MAP_BRANCH_CODE
+    ) y
+    on x.DEPARTMENT_ID=y.BRANCH_CODE) z
+    on x.orgcode=z.department_id
+
+    left join
+    (select MAP_BRANCH_CODE department_id,
+    sum(d4_01) d4_01_lm,sum(f4_01)  f4_01_lm,
+    sum(d4_02) d4_02_lm, sum(f4_02) f4_02_lm, 
+    sum(d4_03) d4_03_lm, sum(f4_03) f4_03_lm, 
+    sum(d4_04) d4_04_lm, sum(f4_04) f4_04_lm, 
+    sum(d4_05) d4_05_lm, sum(f4_05) f4_05_lm,  
+    sum(d4_06) d4_06_lm, sum(f4_06) f4_06_lm,  
+    sum(d4_07) d4_07_lm, sum(f4_07) f4_07_lm,  
+    sum(d4_08) d4_08_lm, sum(f4_08) f4_08_lm, 
+    sum(d4_09) d4_09_lm, sum(f4_09) f4_09_lm, 
+    sum(d4_10) d4_10_lm, sum(f4_10) f4_10_lm,  
+    sum(d4_11) d4_11_lm, sum(f4_11) f4_11_lm,  
+    sum(d4_12) d4_12_lm, sum(f4_12) f4_12_lm,  
+    sum(d4_13) d4_13_lm, sum(f4_13) f4_13_lm,  
+    sum(d4_14) d4_14_lm, sum(f4_14) f4_14_lm,
+    sum(d4_00) d4_00_lm, sum(f4_00) f4_00_lm,
+    sum(d4_98) d4_98_lm, sum(f4_98) f4_98_lm,
+    sum(d4_99) d4_99_lm, sum(f4_99) f4_99_lm 
+    from base_app_cisp.t_branch_y4_fzjgywjgbb_t lmt , 
+    (select branch_code,if(map_branch_code1 is null,map_branch_code,map_branch_code1) MAP_BRANCH_CODE,MAP_BRANCH_ABBREV,MAP_BRANCH_CODE1 from rmdc.params_tb_branch_map) bran_map  
+    where lmt.period=='{last_2_month}'  and if(substr({last_month},5,2)='01',0,1)=1 and  lmt.department_id=bran_map.branch_code  group by MAP_BRANCH_CODE) lm
+on x.orgcode=lm.department_id
