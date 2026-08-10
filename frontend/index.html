@@ -348,7 +348,21 @@
     >
       <div style="margin-bottom: 12px; padding: 10px 14px; background: #f5f7fa; border-radius: 8px; display: flex; align-items: center; justify-content: space-between;">
         <span style="font-weight: 600; color: #303133;">当前节点：{{ detailTableName }}</span>
-        <span class="relation-count">{{ filteredDetailGroups.length }} 组表关系</span>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <el-button type="primary" size="small" :loading="explaining" @click="explainCurrentNode">✨ AI 解释该表血缘</el-button>
+          <span class="relation-count">{{ filteredDetailGroups.length }} 组表关系</span>
+        </div>
+      </div>
+      <div v-if="explainResult" style="margin-bottom: 16px; padding: 14px; background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 8px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+          <span style="font-weight: 600; color: #67c23a;">✨ 业务化解释</span>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <el-tag v-if="explainResult.ai_used" type="success" size="small">AI 生成</el-tag>
+            <el-tag v-else type="info" size="small">模板降级</el-tag>
+            <el-button text size="small" @click="explainResult = null">关闭</el-button>
+          </div>
+        </div>
+        <pre style="white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 13px; line-height: 1.7; color: #303133; margin: 0;">{{ explainResult.explanation }}</pre>
       </div>
       <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
         <span style="color: #606266; font-size: 13px;">筛选:</span>
@@ -449,6 +463,8 @@
         const detailVisible = ref(false);
         const detailTableName = ref('');
         const detailGroups = ref([]);
+        const explaining = ref(false);
+        const explainResult = ref(null);
         const filterRole = ref('ALL');
         const filteredDetailGroups = computed(() => {
           const filterFn = (c) => filterRole.value === 'ALL' || (c.source_role || 'direct') === filterRole.value;
@@ -847,9 +863,30 @@
                   .map(g => ({ ...g, columns: g.columns.slice(0, 300) }));
                 detailTableName.value = tableName;
                 filterRole.value = 'ALL';
+                explainResult.value = null;
                 detailVisible.value = true;
               }
             }
+        };
+
+        // AI 业务化解释当前节点表血缘
+        const explainCurrentNode = async () => {
+          if (!detailTableName.value) return;
+          explaining.value = true;
+          explainResult.value = null;
+          try {
+            const resp = await axios.post('/api/lineage/explain', {
+              table: detailTableName.value,
+              field: '*',
+              direction: 'both',
+              report_code: 'Y4'
+            });
+            explainResult.value = resp.data;
+          } catch (e) {
+            ElementPlus.ElMessage.error('AI 解释失败：' + (e.response?.data?.error || e.message));
+          } finally {
+            explaining.value = false;
+          }
         };
 
         const initGraph = () => {
@@ -1607,6 +1644,9 @@
           detailVisible,
           detailTableName,
           detailGroups,
+          explaining,
+          explainResult,
+          explainCurrentNode,
           filterRole,
           filteredDetailGroups,
           parseSQL,

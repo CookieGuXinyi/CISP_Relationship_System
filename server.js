@@ -6,6 +6,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const { Pool } = require('pg');
+const { callLLM } = require('./ai_client');
 
 const app = express();
 const PORT = 3000;
@@ -636,6 +637,270 @@ app.get('/api/lineage/multi', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+// ==================== 字段血缘文字化解释（AI） ====================
+app.post('/api/lineage/explain', async (req, res) => {
+    const { table, field, direction = 'both', report_code = 'Y4' } = req.body || {};
+    if (!table || !field) {
+        return res.status(400).json({ error: '需要提供 table 和 field' });
+    }
+
+    try {
+        let lineage;
+        if (field === '*' || !field) {
+            // 表级解释：直接查该表作为源或目标的所有直接血缘行
+            lineage = await new Promise((resolve, reject) => {
+                db.all(
+                    `SELECT * FROM field_lineage WHERE report_code = ? AND (source_table = ? OR target_table = ?) ORDER BY id LIMIT 500`,
+                    [report_code, table, table],
+                    (err, rows) => err ? reject(err) : resolve(rows || [])
+                );
+            });
+        } else {
+            // 字段级解释：复用 multi 查询逻辑获取多层血缘链路
+            lineage = await fetchLineageMulti(table, field, direction, report_code);
+        }
+        if (!lineage || lineage.length === 0) {
+            return res.json({ explanation: `未找到表/字段 "${table}.${field}" 的血缘信息。`, context: { table, field, direction } });
+        }
+
+        // 组织血缘上下文给 LLM
+        const context = buildExplainContext(table, field, direction, lineage);
+        const prompt = buildExplainPrompt(context);
+
+        let explanation = '';
+        let aiUsed = false;
+        try {
+            const resp = await callLLM({
+                system: prompt.system,
+                user: prompt.user,
+                temperature: 0.3,
+                maxTokens: 2200
+            });
+            explanation = resp.content;
+            aiUsed = true;
+        } catch (aiErr) {
+            console.error('AI 调用失败，降级为模板:', aiErr.message);
+            explanation = buildFallbackExplanation(context);
+        }
+
+        res.json({
+            explanation,
+            ai_used: aiUsed,
+            context: { table, field, direction, lineage_count: lineage.length, table_count: context.tables.size }
+        });
+    } catch (err) {
+        console.error('血缘解释错误:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 复用 multi 查询：内部封装，返回 lineage 数组
+async function fetchLineageMulti(targetTable, targetField, direction, reportCode) {
+    const maxLevel = 5;
+    const maxRows = 2000;
+
+    const seedRows = await new Promise((resolve, reject) => {
+        db.all(
+            `SELECT * FROM field_lineage WHERE report_code = ? AND (
+                (source_table = ? AND source_field = ?) OR
+                (target_table = ? AND target_field = ?)
+            )`,
+            [reportCode, targetTable, targetField, targetTable, targetField],
+            (err, rows) => err ? reject(err) : resolve(rows)
+        );
+    });
+
+    if (seedRows.length === 0) return [];
+
+    const visitedRowIds = new Set();
+    const resultRows = [];
+
+    for (const row of seedRows) {
+        if (!visitedRowIds.has(row.id)) {
+            visitedRowIds.add(row.id);
+            resultRows.push({ ...row, level: 0 });
+        }
+    }
+
+    const needDownstream = direction === 'downstream' || direction === 'both';
+    const needUpstream = direction === 'upstream' || direction === 'both';
+
+    if (needUpstream) {
+        const visitedPairs = new Set([`${targetTable}|${targetField}`]);
+        let currentPairs = [[targetTable, targetField]];
+        for (let lv = 0; lv < maxLevel && resultRows.length < maxRows; lv++) {
+            if (currentPairs.length === 0) break;
+            const sqlParts = [];
+            const sqlParams = [];
+            for (const [tbl, fld] of currentPairs) {
+                sqlParts.push(`SELECT * FROM field_lineage WHERE report_code = ? AND target_table = ? AND target_field = ?`);
+                sqlParams.push(reportCode, tbl, fld);
+            }
+            const layerRows = await new Promise((resolve, reject) => {
+                db.all(sqlParts.join(' UNION '), sqlParams, (err, rows) => err ? reject(err) : resolve(rows));
+            });
+            const nextPairs = [];
+            for (const row of layerRows) {
+                if (resultRows.length >= maxRows) break;
+                if (!visitedRowIds.has(row.id)) {
+                    visitedRowIds.add(row.id);
+                    resultRows.push({ ...row, level: lv + 1 });
+                }
+                const key = `${row.source_table}|${row.source_field}`;
+                if (!visitedPairs.has(key)) {
+                    visitedPairs.add(key);
+                    nextPairs.push([row.source_table, row.source_field]);
+                }
+            }
+            currentPairs = nextPairs;
+        }
+    }
+
+    if (needDownstream) {
+        const visitedPairs = new Set([`${targetTable}|${targetField}`]);
+        let currentPairs = [[targetTable, targetField]];
+        for (let lv = 0; lv < maxLevel && resultRows.length < maxRows; lv++) {
+            if (currentPairs.length === 0) break;
+            const sqlParts = [];
+            const sqlParams = [];
+            for (const [tbl, fld] of currentPairs) {
+                sqlParts.push(`SELECT * FROM field_lineage WHERE report_code = ? AND source_table = ? AND source_field = ?`);
+                sqlParams.push(reportCode, tbl, fld);
+            }
+            const layerRows = await new Promise((resolve, reject) => {
+                db.all(sqlParts.join(' UNION '), sqlParams, (err, rows) => err ? reject(err) : resolve(rows));
+            });
+            const nextPairs = [];
+            for (const row of layerRows) {
+                if (resultRows.length >= maxRows) break;
+                if (!visitedRowIds.has(row.id)) {
+                    visitedRowIds.add(row.id);
+                    resultRows.push({ ...row, level: lv + 1 });
+                }
+                const key = `${row.target_table}|${row.target_field}`;
+                if (!visitedPairs.has(key)) {
+                    visitedPairs.add(key);
+                    nextPairs.push([row.target_table, row.target_field]);
+                }
+            }
+            currentPairs = nextPairs;
+        }
+    }
+
+    return resultRows;
+}
+
+// 构建给 LLM 的血缘上下文
+function buildExplainContext(targetTable, targetField, direction, lineage) {
+    const tables = new Set();
+    const upstream = [];   // 上游：谁流向 target
+    const downstream = []; // 下游：target 流向谁
+    const isTableMode = targetField === '*' || !targetField;
+
+    lineage.forEach(row => {
+        if (row.source_table) tables.add(row.source_table);
+        if (row.target_table) tables.add(row.target_table);
+
+        if (row.source_field === 'TABLE_LEVEL') return;
+
+        // 表级模式：只按表名匹配；字段级模式：表名+字段名都匹配
+        const isUpstream = isTableMode
+            ? (row.target_table === targetTable)
+            : (row.target_table === targetTable && row.target_field === targetField);
+        const isDownstream = isTableMode
+            ? (row.source_table === targetTable)
+            : (row.source_table === targetTable && row.source_field === targetField);
+
+        const item = {
+            source: `${row.source_table}.${row.source_field}`,
+            target: `${row.target_table}.${row.target_field}`,
+            expression_type: row.expression_type,
+            source_role: row.source_role,
+            expression: row.full_expression || row.expression || '',
+            level: row.level
+        };
+
+        if (isUpstream) upstream.push(item);
+        else if (isDownstream) downstream.push(item);
+    });
+
+    // 按 level 排序，便于 LLM 理解层级
+    upstream.sort((a, b) => (a.level || 0) - (b.level || 0));
+    downstream.sort((a, b) => (a.level || 0) - (b.level || 0));
+
+    return { targetTable, targetField, direction, tables, upstream, downstream, lineageCount: lineage.length };
+}
+
+// 构建提示词（聚焦 CISP 证券业务场景）
+function buildExplainPrompt(ctx) {
+    const system = `你是一名熟悉中国证券行业 CISP（中国证券投资者保护基金）报表体系的业务分析师，精通证券公司经纪业务、分支机构监管报表的数据血缘。
+你的任务是根据提供的字段血缘信息，用中文向**不懂代码的业务人员**解释该字段的来龙去脉。
+
+要求：
+1. 用证券公司营业网点的业务语言表述（如：客户交易、成交金额、佣金收入、持仓、分支机构、监管报送等），避免堆砌 SQL 函数名。
+2. 讲清楚三点：(a) 这个字段算的是什么业务含义；(b) 数据从哪些上游表/字段汇总或加工而来，按层级说明；(c) 它又流向哪些下游表/字段，用于什么用途。
+3. 对聚合类表达式（SUM/COUNT/AVG/MAX/MIN）说明统计口径和维度；对 CASE WHEN 说明业务分类逻辑；对 COALESCE 说明空值兜底含义。
+4. 表名/字段名保留原样（不要翻译或缩写），但可在其后括注业务含义。
+5. 如果血缘中存在明显的数据质量问题（如常量兜底、疑似缺失上游），简要提示风险。
+6. 输出结构化为三段：「字段含义」「上游来源」「下游去向」，每段用要点列出，必要时给出简短总结。不要输出与血缘无关的内容。`;
+
+    const formatItems = (items) => {
+        if (items.length === 0) return '（无）';
+        return items.map((it, i) =>
+            `${i + 1}. [层级${it.level}] ${it.source} → ${it.target}\n   类型:${it.expression_type} 角色:${it.source_role}\n   表达式:${it.expression}`
+        ).join('\n');
+    };
+
+    const user = `【目标字段】
+表：${ctx.targetTable}
+字段：${ctx.targetField}
+查询方向：${ctx.direction}
+涉及表数量：${ctx.tables.size}
+血缘关系总数：${ctx.lineageCount}
+
+【直接上游血缘】（谁流入此字段）
+${formatItems(ctx.upstream)}
+
+【直接下游血缘】（此字段流向谁）
+${formatItems(ctx.downstream)}
+
+请按系统提示的要求输出业务化解释。`;
+
+    return { system, user };
+}
+
+// AI 不可用时的降级模板输出
+function buildFallbackExplanation(ctx) {
+    const lines = [];
+    lines.push(`【字段含义】`);
+    lines.push(`字段 ${ctx.targetTable}.${ctx.targetField}（查询方向：${ctx.direction}），共涉及 ${ctx.tables.size} 张表、${ctx.lineageCount} 条血缘关系。`);
+    lines.push('');
+    lines.push(`【上游来源】`);
+    if (ctx.upstream.length === 0) {
+        lines.push('（无直接上游血缘）');
+    } else {
+        ctx.upstream.forEach((it, i) => {
+            lines.push(`${i + 1}. ${it.source} → ${it.target}`);
+            lines.push(`   类型：${it.expression_type}，角色：${it.source_role}`);
+            lines.push(`   表达式：${it.expression}`);
+        });
+    }
+    lines.push('');
+    lines.push(`【下游去向】`);
+    if (ctx.downstream.length === 0) {
+        lines.push('（无直接下游血缘）');
+    } else {
+        ctx.downstream.forEach((it, i) => {
+            lines.push(`${i + 1}. ${it.source} → ${it.target}`);
+            lines.push(`   类型：${it.expression_type}，角色：${it.source_role}`);
+            lines.push(`   表达式：${it.expression}`);
+        });
+    }
+    lines.push('');
+    lines.push('（注：AI 服务暂不可用，以上为模板化输出）');
+    return lines.join('\n');
+}
 
 // ==================== 获取解析统计 ====================
 app.get('/api/lineage/stats', (req, res) => {
