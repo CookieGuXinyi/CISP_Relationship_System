@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <title>CISP 血缘质量溯源系统</title>
   <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f7fa; }
     .app-container { padding: 20px; max-width: 1400px; margin: 0 auto; }
@@ -35,6 +37,24 @@
     .column-detail-table th { background: #fafafa; font-weight: 600; color: #606266; }
     .column-detail-table tr:hover { background: #f5f7fa; }
     .relation-count { font-size: 11px; color: #909399; }
+    .md-body { font-size: 13px; line-height: 1.75; color: #303133; word-break: normal; overflow-wrap: break-word; }
+    .md-body h1, .md-body h2, .md-body h3, .md-body h4 { margin: 12px 0 6px; font-weight: 600; color: #2c3e50; line-height: 1.4; }
+    .md-body h1 { font-size: 17px; }
+    .md-body h2 { font-size: 15px; }
+    .md-body h3 { font-size: 14px; }
+    .md-body h4 { font-size: 13px; }
+    .md-body p { margin: 6px 0; }
+    .md-body ul, .md-body ol { margin: 6px 0; padding-left: 22px; }
+    .md-body li { margin: 3px 0; }
+    .md-body strong { font-weight: 600; color: #303133; }
+    .md-body em { font-style: italic; }
+    .md-body code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-family: 'Monaco','Menlo',Consolas,monospace; font-size: 12px; color: #c7254e; }
+    .md-body pre { background: #f5f5f5; padding: 8px 10px; border-radius: 4px; overflow-x: auto; margin: 6px 0; }
+    .md-body pre code { background: none; color: #303133; padding: 0; }
+    .md-body blockquote { border-left: 3px solid #67c23a; padding-left: 10px; margin: 6px 0; color: #606266; }
+    .md-body hr { border: none; border-top: 1px solid #e0e0e0; margin: 10px 0; }
+    .md-body table { border-collapse: collapse; margin: 6px 0; }
+    .md-body th, .md-body td { border: 1px solid #e0e0e0; padding: 4px 8px; }
   </style>
 </head>
 <body>
@@ -355,14 +375,14 @@
       </div>
       <div v-if="explainResult" style="margin-bottom: 16px; padding: 14px; background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 8px;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-          <span style="font-weight: 600; color: #67c23a;">✨ 业务化解释</span>
+          <span style="font-weight: 600; color: #67c23a;">✨ {{ explainResult.context?.field === '*' ? '表级业务化解释' : '字段业务化解释' }}</span>
           <div style="display: flex; gap: 8px; align-items: center;">
             <el-tag v-if="explainResult.ai_used" type="success" size="small">AI 生成</el-tag>
             <el-tag v-else type="info" size="small">模板降级</el-tag>
             <el-button text size="small" @click="explainResult = null">关闭</el-button>
           </div>
         </div>
-        <pre style="white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 13px; line-height: 1.7; color: #303133; margin: 0;">{{ explainResult.explanation }}</pre>
+        <div v-html="renderedExplain" class="md-body" style="margin: 0;"></div>
       </div>
       <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
         <span style="color: #606266; font-size: 13px;">筛选:</span>
@@ -389,6 +409,7 @@
                 <th>类型</th>
                 <th>角色</th>
                 <th>表达式</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -402,6 +423,9 @@
                   <span :style="getRoleStyle(item.source_role)">{{ getRoleLabel(item.source_role) }}</span>
                 </td>
                 <td style="color: #909399; font-size: 12px; max-width: 400px; word-break: break-all;">{{ item.full_expression || item.expression || '直接映射' }}</td>
+                <td>
+                  <el-button size="small" type="primary" text :loading="explainingField === `${group.targetTable}.${item.target_field}`" @click="explainField(group.targetTable, item.target_field)">✨</el-button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -409,6 +433,29 @@
       </div>
       <div v-else style="text-align: center; padding: 40px; color: #909399;">
         当前筛选条件下暂无数据
+      </div>
+    </el-dialog>
+
+    <!-- 字段级 AI 解释独立弹窗 -->
+    <el-dialog
+      v-model="fieldExplainVisible"
+      :title="`✨ 字段血缘解释 - ${fieldExplainTitle}`"
+      width="700px"
+      class="column-detail-modal"
+      append-to-body
+    >
+      <div v-if="fieldExplainResult" style="padding: 4px;">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+          <el-tag v-if="fieldExplainResult.ai_used" type="success" size="small">AI 生成</el-tag>
+          <el-tag v-else type="info" size="small">模板降级</el-tag>
+          <span v-if="fieldExplainResult.context" style="font-size: 12px; color: #909399;">
+            血缘层数：{{ fieldExplainResult.context.lineage_count || 0 }} 条
+          </span>
+        </div>
+        <div v-html="renderedFieldExplain" class="md-body" style="padding: 14px; background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 8px;"></div>
+      </div>
+      <div v-else style="text-align: center; padding: 40px; color: #909399;">
+        {{ explainingField ? 'AI 解析中...' : '暂无解释结果' }}
       </div>
     </el-dialog>
   </div>
@@ -465,6 +512,49 @@
         const detailGroups = ref([]);
         const explaining = ref(false);
         const explainResult = ref(null);
+        const explainingField = ref('');
+        const fieldExplainVisible = ref(false);
+        const fieldExplainResult = ref(null);
+        const fieldExplainTitle = ref('');
+        const renderMarkdown = (text) => {
+          if (!text) return '';
+          try {
+            let html = '';
+            if (typeof marked !== 'undefined') {
+              if (typeof marked.parse === 'function') html = marked.parse(text);
+              else if (typeof marked.marked === 'function') html = marked.marked(text);
+              else if (typeof marked === 'function') html = marked(text);
+              else html = window.marked.marked ? window.marked.marked(text) : text;
+            } else {
+              html = text
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+                .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+                .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+                .replace(/^\*\*(.+)\*\*$/gm, '<strong>$1</strong>')
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/^- (.+)$/gm, '<li>$1</li>')
+                .replace(/(<li>[\s\S]+?<\/li>)/g, '<ul>$1</ul>')
+                .replace(/\n\n/g, '</p><p>')
+                .replace(/^([^<].+)$/gm, '<p>$1</p>');
+            }
+            return window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+          } catch (e) {
+            console.error('[renderMarkdown] 渲染失败:', e);
+            return text;
+          }
+        };
+
+        const renderedExplain = computed(() => {
+          if (!explainResult.value?.explanation) return '';
+          return renderMarkdown(explainResult.value.explanation);
+        });
+
+        const renderedFieldExplain = computed(() => {
+          if (!fieldExplainResult.value?.explanation) return '';
+          return renderMarkdown(fieldExplainResult.value.explanation);
+        });
         const filterRole = ref('ALL');
         const filteredDetailGroups = computed(() => {
           const filterFn = (c) => filterRole.value === 'ALL' || (c.source_role || 'direct') === filterRole.value;
@@ -886,6 +976,28 @@
             ElementPlus.ElMessage.error('AI 解释失败：' + (e.response?.data?.error || e.message));
           } finally {
             explaining.value = false;
+          }
+        };
+
+        const explainField = async (tableName, fieldName) => {
+          if (!tableName || !fieldName) return;
+          explainingField.value = `${tableName}.${fieldName}`;
+          fieldExplainTitle.value = `${tableName}.${fieldName}`;
+          fieldExplainResult.value = null;
+          fieldExplainVisible.value = true;
+          try {
+            const resp = await axios.post('/api/lineage/explain', {
+              table: tableName,
+              field: fieldName,
+              direction: 'upstream',
+              report_code: 'Y4'
+            });
+            fieldExplainResult.value = resp.data;
+          } catch (e) {
+            ElementPlus.ElMessage.error('字段 AI 解释失败：' + (e.response?.data?.error || e.message));
+            fieldExplainVisible.value = false;
+          } finally {
+            explainingField.value = '';
           }
         };
 
@@ -1646,7 +1758,14 @@
           detailGroups,
           explaining,
           explainResult,
+          explainingField,
+          fieldExplainVisible,
+          fieldExplainResult,
+          fieldExplainTitle,
+          renderedExplain,
+          renderedFieldExplain,
           explainCurrentNode,
+          explainField,
           filterRole,
           filteredDetailGroups,
           parseSQL,
