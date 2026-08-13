@@ -147,31 +147,75 @@ class SQLBloodlineParser:
         self._extract_column_lineage_compat(tree)
         self._extract_case_mappings(tree)
 
-    def _extract_blocks(self, node, target_table, statement_type):
+    def _extract_blocks(self, node, target_table, statement_type, parent_block_id=None):
         if node is None:
             return None
 
         if isinstance(node, exp.Union):
-            left_block = self._extract_blocks(node.left, target_table, statement_type)
-            right_block = self._extract_blocks(node.right, target_table, statement_type)
+            left_block = self._extract_blocks(node.left, target_table, statement_type, parent_block_id)
+            right_block = self._extract_blocks(node.right, target_table, statement_type, parent_block_id)
             return self._create_union_block(left_block, right_block, target_table, statement_type)
 
         if isinstance(node, exp.Subquery):
-            return self._extract_blocks(node.this, target_table, statement_type)
+            return self._extract_blocks(node.this, target_table, statement_type, parent_block_id)
 
         if isinstance(node, exp.Select):
-            return self._extract_select_block(node, target_table, statement_type)
+            return self._extract_select_block(node, target_table, statement_type, parent_block_id)
 
         return None
 
-    def _extract_select_block(self, select, target_table, statement_type):
+    def _extract_select_block(self, select, target_table, statement_type, parent_block_id=None):
         block_id = self._next_block_id()
 
-        from_info = self._extract_from_info(select)
-        joins = self._extract_joins(select)
-        where_conditions = self._extract_where(select)
-        group_by = self._extract_group_by(select)
-        having = self._extract_having(select)
+        # 先创建block骨架并入列表，确保子查询能引用parent_block_id
+        # 为子查询block生成虚拟target_table标识
+        virtual_target_table = target_table if target_table else f"SUBQUERY_TARGET_{block_id}"
+        block = {
+            "block_id": block_id,
+            "parent_block_id": parent_block_id,
+            "block_type": "SELECT",
+            "target_table": virtual_target_table,
+            "statement_type": statement_type,
+            "from_table": None,
+            "from_alias": None,
+            "from_subquery": None,
+            "joins": [],
+            "columns": [],
+            "where_conditions": [],
+            "group_by": [],
+            "having": None,
+            "sql_hash": self._compute_sql_hash(str(select)),
+            "job_id": self._current_job_id,
+            "period": self._current_period,
+            "created_at": datetime.now().isoformat()
+        }
+        self.blocks.append(block)
+
+        try:
+            from_info = self._extract_from_info(select, block_id)
+        except Exception as e:
+            print(f"⚠️ _extract_from_info失败: {e}", file=sys.stderr)
+            from_info = None
+        try:
+            joins = self._extract_joins(select, block_id)
+        except Exception as e:
+            print(f"⚠️ _extract_joins失败: {e}", file=sys.stderr)
+            joins = []
+        try:
+            where_conditions = self._extract_where(select)
+        except Exception as e:
+            print(f"⚠️ _extract_where失败: {e}", file=sys.stderr)
+            where_conditions = []
+        try:
+            group_by = self._extract_group_by(select)
+        except Exception as e:
+            print(f"⚠️ _extract_group_by失败: {e}", file=sys.stderr)
+            group_by = []
+        try:
+            having = self._extract_having(select)
+        except Exception as e:
+            print(f"⚠️ _extract_having失败: {e}", file=sys.stderr)
+            having = None
 
         columns = []
         for expr in select.expressions:
@@ -190,26 +234,17 @@ class SQLBloodlineParser:
                     "expression_type": "star"
                 })
 
-        block = {
-            "block_id": block_id,
-            "block_type": "SELECT",
-            "target_table": target_table,
-            "statement_type": statement_type,
-            "from_table": from_info.get('table') if from_info else None,
-            "from_alias": from_info.get('alias') if from_info else None,
-            "from_subquery": from_info.get('subquery') if from_info else None,
-            "joins": joins,
-            "columns": columns,
-            "where_conditions": where_conditions,
-            "group_by": group_by,
-            "having": having,
-            "sql_hash": self._compute_sql_hash(str(select)),
-            "job_id": self._current_job_id,
-            "period": self._current_period,
-            "created_at": datetime.now().isoformat()
-        }
+        block["from_table"] = from_info.get('table') if from_info else None
+        block["from_alias"] = from_info.get('alias') if from_info else None
+        block["from_subquery"] = from_info.get('subquery') if from_info else None
+        block["joins"] = joins
+        block["columns"] = columns
+        block["where_conditions"] = where_conditions
+        block["group_by"] = group_by
+        block["having"] = having
 
-        self.blocks.append(block)
+        # 生成包含筛选条件的兼容 column_lineage
+        self._extract_columns_from_select_with_filters(select, virtual_target_table, group_by, where_conditions, having)
 
         # 如果开启了数据库存储，立即写入
         if self.db_path:
@@ -385,8 +420,8 @@ class SQLBloodlineParser:
                 cl.get("layer", "UNKNOWN"),
                 cl.get("agg_func"),
                 1 if cl.get("has_distinct") else 0,
-                json.dumps(cl.get("group_by", [])) if cl.get("group_by") else None,
-                cl.get("having"),
+                cl.get("group_by"),  # 直接使用字符串
+                cl.get("having_cond") or cl.get("having"),  # having_cond 兼容 having
                 cl.get("where_condition"),
                 1 if cl.get("is_grouped") else 0
             ))
@@ -436,6 +471,55 @@ class SQLBloodlineParser:
                         "layer": self._infer_layer(target_table)
                     })
 
+    def _extract_columns_from_select_with_filters(self, select, target_table, group_by, where_conditions, having):
+        """生成包含筛选条件的兼容 column_lineage 记录"""
+        # 构建 filter_cond JSON
+        filter_cond = {}
+        if group_by:
+            filter_cond['group_by'] = group_by
+        if where_conditions:
+            filter_cond['where'] = where_conditions[0].get('expression') if where_conditions else None
+        if having:
+            filter_cond['having'] = having
+        
+        is_grouped = bool(group_by)
+
+        # 为子查询block生成虚拟target_table标识（避免UNKNOWN_TABLE）
+        effective_target = target_table
+        if not effective_target:
+            effective_target = f"__SUBQUERY__"
+
+        for expr in select.expressions:
+            inner_expr = expr.this if isinstance(expr, exp.Alias) else expr
+            alias = expr.alias_or_name if isinstance(expr, exp.Alias) else (expr.name if isinstance(expr, exp.Column) else None)
+            if alias is None:
+                continue
+            source_cols = self._find_source_columns(inner_expr, role='direct')
+            expr_type = self._classify_expression_type(
+                self._clean_expression(inner_expr.sql()), inner_expr
+            )
+            for col in source_cols:
+                self.column_lineage.append({
+                    "source_table": col.get('table'),
+                    "source_column": col.get('column'),
+                    "target_table": effective_target,
+                    "target_column": alias,
+                    "expression": self._get_simplified_expression(inner_expr),
+                    "full_expression": self._clean_expression(inner_expr.sql()),
+                    "expression_type": expr_type,
+                    "source_role": col.get('role', 'direct'),
+                    "agg_func": inner_expr.__class__.__name__.lower() if isinstance(inner_expr, exp.AggFunc) else None,
+                    "has_distinct": self._has_distinct(inner_expr),
+                    "job_id": self._current_job_id,
+                    "layer": self._infer_layer(effective_target),
+                    # 新增筛选条件字段
+                    "filter_cond": json.dumps(filter_cond) if filter_cond else None,
+                    "group_by": ', '.join(group_by) if group_by else None,
+                    "having_cond": having,
+                    "where_condition": filter_cond.get('where'),
+                    "is_grouped": is_grouped
+                })
+
     def _has_distinct(self, expr):
         if not isinstance(expr, exp.AggFunc):
             return False
@@ -458,8 +542,17 @@ class SQLBloodlineParser:
 
     def _extract_case_mappings(self, tree):
         for case in tree.find_all(exp.Case):
-            for when in case.args.get('ifs', []):
-                if isinstance(when, exp.If):
+            whens = case.args.get('whens', []) or case.args.get('ifs', [])
+            for when in whens:
+                if isinstance(when, exp.When):
+                    condition = when.this
+                    true_value = when.args.get('true')
+                    if condition and true_value:
+                        self.case_mappings.append({
+                            "condition": self._clean_expression(condition.sql()),
+                            "result": self._clean_expression(true_value.sql())
+                        })
+                elif isinstance(when, exp.If):
                     condition = when.args.get('this')
                     true_value = when.args.get('true')
                     if condition and true_value:
@@ -468,8 +561,17 @@ class SQLBloodlineParser:
                             "result": self._clean_expression(true_value.sql())
                         })
 
+    def _resolve_column_table(self, table_name):
+        """将列上的表别名解析为物理表名"""
+        if not table_name:
+            return None
+        resolved = self._resolve_table_name(table_name)
+        return resolved
+
     def _find_source_columns(self, expr, scoped_aliases=None, role='direct'):
         results = []
+        if expr is None:
+            return results
         if isinstance(expr, exp.Column):
             table_name = self._extract_table_from_column(expr)
             if table_name:
@@ -486,10 +588,9 @@ class SQLBloodlineParser:
                                 "role": src.get('role', role)
                             })
                         return results
-                resolved_table = self._resolve_table_name(table_name)
-                table_name = resolved_table
+            resolved_table = self._resolve_column_table(table_name)
             results.append({
-                "table": table_name,
+                "table": resolved_table,
                 "column": expr.name,
                 "expression": self._clean_expression(expr.sql()),
                 "role": role
@@ -497,13 +598,21 @@ class SQLBloodlineParser:
         elif isinstance(expr, exp.AggFunc):
             for arg in expr.args.get('expressions', []):
                 results.extend(self._find_source_columns(arg, scoped_aliases, 'data_source'))
+            if hasattr(expr, 'this') and expr.this and not expr.args.get('expressions'):
+                results.extend(self._find_source_columns(expr.this, scoped_aliases, 'data_source'))
         elif isinstance(expr, exp.Case):
-            for when in expr.args.get('ifs', []):
-                if isinstance(when, exp.If):
+            whens = expr.args.get('whens', []) or expr.args.get('ifs', [])
+            for when in whens:
+                if isinstance(when, exp.When):
+                    results.extend(self._find_source_columns(when.this, scoped_aliases, 'filter'))
+                    true_val = when.args.get('true')
+                    if true_val is not None:
+                        results.extend(self._find_source_columns(true_val, scoped_aliases, 'data_source'))
+                elif isinstance(when, exp.If):
                     results.extend(self._find_source_columns(when.args.get('this'), scoped_aliases, 'filter'))
                     results.extend(self._find_source_columns(when.args.get('true'), scoped_aliases, 'data_source'))
             default_val = expr.args.get('default')
-            if default_val:
+            if default_val is not None:
                 results.extend(self._find_source_columns(default_val, scoped_aliases, 'data_source'))
         elif isinstance(expr, exp.Binary):
             results.extend(self._find_source_columns(expr.this, scoped_aliases, role))
@@ -512,6 +621,8 @@ class SQLBloodlineParser:
         elif isinstance(expr, exp.Func):
             for arg in expr.args.get('expressions', []):
                 results.extend(self._find_source_columns(arg, scoped_aliases, role))
+            if hasattr(expr, 'this') and expr.this:
+                results.extend(self._find_source_columns(expr.this, scoped_aliases, role))
         return results
 
     def _extract_table_from_column(self, col):
@@ -587,7 +698,7 @@ class SQLBloodlineParser:
 
     # ==================== 辅助提取方法 ====================
 
-    def _extract_from_info(self, select):
+    def _extract_from_info(self, select, parent_block_id=None):
         from_expr = select.args.get('from_')
         if not from_expr:
             return None
@@ -596,29 +707,29 @@ class SQLBloodlineParser:
             if isinstance(this, exp.Table):
                 return {"table": self._get_full_name(this), "alias": this.alias if hasattr(this, 'alias') and this.alias else None}
             if isinstance(this, exp.Subquery):
-                return {"subquery": self._extract_blocks(this.this, None, 'SUBQUERY'), "alias": this.alias if hasattr(this, 'alias') and this.alias else None}
+                sq_block = self._extract_blocks(this.this, None, 'SUBQUERY', parent_block_id)
+                return {"subquery": sq_block, "alias": this.alias if hasattr(this, 'alias') and this.alias else None}
         return None
 
-    def _extract_joins(self, select):
+    def _extract_joins(self, select, parent_block_id=None):
         joins = []
         join_exprs = select.args.get('joins', [])
         for join in join_exprs:
             if not isinstance(join, exp.Join):
                 continue
-            join_type = 'INNER'
-            if isinstance(join, exp.LeftJoin):
-                join_type = 'LEFT'
-            elif isinstance(join, exp.RightJoin):
-                join_type = 'RIGHT'
-            elif isinstance(join, exp.FullJoin):
-                join_type = 'FULL'
+            # sqlglot v2: kind 是 Join 的属性，返回 JoinKind 枚举
+            try:
+                kind = join.kind
+                join_type = kind.name if hasattr(kind, 'name') else str(kind).upper()
+            except Exception:
+                join_type = 'INNER'
             this = join.args.get('this')
             join_info = {"type": join_type}
             if isinstance(this, exp.Table):
                 join_info["table"] = self._get_full_name(this)
                 join_info["alias"] = this.alias if hasattr(this, 'alias') and this.alias else None
             elif isinstance(this, exp.Subquery):
-                join_info["subquery"] = self._extract_blocks(this.this, None, 'SUBQUERY')
+                join_info["subquery"] = self._extract_blocks(this.this, None, 'SUBQUERY', parent_block_id)
                 join_info["alias"] = this.alias if hasattr(this, 'alias') and this.alias else None
             else:
                 continue
@@ -651,6 +762,7 @@ class SQLBloodlineParser:
             "target": target_name,
             "source": None,
             "source_table": None,
+            "source_tables": [],
             "agg_func": None,
             "has_distinct": False,
             "expression": self._clean_expression(expr.sql()),
@@ -665,30 +777,59 @@ class SQLBloodlineParser:
                     result["has_distinct"] = True
                     for de in arg.args.get('expressions', []):
                         if isinstance(de, exp.Column):
-                            result["source"] = de.name
-                            result["source_table"] = self._extract_table_from_column(de)
+                            tbl = self._resolve_column_table(self._extract_table_from_column(de))
+                            result["source_tables"].append(tbl)
+                            result["source"] = de.name if not result["source"] else result["source"]
                 elif isinstance(arg, exp.Column):
+                    tbl = self._resolve_column_table(self._extract_table_from_column(arg))
+                    result["source_tables"].append(tbl)
                     result["source"] = arg.name
-                    result["source_table"] = self._extract_table_from_column(arg)
+            if not result["source_tables"] and hasattr(expr, 'this') and expr.this:
+                src_cols = self._find_source_columns(expr.this)
+                for sc in src_cols:
+                    result["source_tables"].append(sc.get('table'))
+                    if sc.get('column') and not result["source"]:
+                        result["source"] = sc.get('column')
         elif isinstance(expr, exp.Case):
             result["expression_type"] = 'case'
-            result["source"] = 'CASE_WHEN'
+            src_cols = self._find_source_columns(expr)
+            cols = []
+            for sc in src_cols:
+                cols.append(sc.get('column'))
+                result["source_tables"].append(sc.get('table'))
+            result["source"] = ', '.join(dict.fromkeys([c for c in cols if c])) if cols else 'CASE_WHEN'
         elif isinstance(expr, exp.Column):
+            tbl = self._resolve_column_table(self._extract_table_from_column(expr))
             result["source"] = expr.name
-            result["source_table"] = self._extract_table_from_column(expr)
+            result["source_table"] = tbl
+            result["source_tables"] = [tbl] if tbl else []
             result["expression_type"] = 'direct'
         elif isinstance(expr, exp.Binary):
             result["expression_type"] = 'binary'
+            src_cols = self._find_source_columns(expr)
             cols = []
-            for col in expr.find_all(exp.Column):
-                cols.append(col.name)
-            result["source"] = ', '.join(cols) if cols else None
+            for sc in src_cols:
+                cols.append(sc.get('column'))
+                result["source_tables"].append(sc.get('table'))
+            result["source"] = ', '.join(dict.fromkeys([c for c in cols if c])) if cols else None
         elif isinstance(expr, exp.Func):
             result["expression_type"] = 'function'
+            src_cols = self._find_source_columns(expr)
             cols = []
-            for col in expr.find_all(exp.Column):
-                cols.append(col.name)
-            result["source"] = ', '.join(cols) if cols else None
+            for sc in src_cols:
+                cols.append(sc.get('column'))
+                result["source_tables"].append(sc.get('table'))
+            result["source"] = ', '.join(dict.fromkeys([c for c in cols if c])) if cols else None
+        else:
+            src_cols = self._find_source_columns(expr)
+            cols = []
+            for sc in src_cols:
+                cols.append(sc.get('column'))
+                result["source_tables"].append(sc.get('table'))
+            if cols:
+                result["source"] = ', '.join(dict.fromkeys([c for c in cols if c]))
+        result["source_tables"] = list(dict.fromkeys([t for t in result["source_tables"] if t]))
+        result["source_table"] = result["source_tables"][0] if result["source_tables"] else result["source_table"]
         return result
 
     def _create_union_block(self, left_block, right_block, target_table, statement_type):
@@ -714,7 +855,9 @@ class SQLBloodlineParser:
 
     def _next_block_id(self):
         self.block_id_counter += 1
-        return f"BLK_{self.block_id_counter:04d}"
+        # 加入 job_id 前缀确保全局唯一，防止多次解析时 UNIQUE 冲突
+        job_prefix = (self._current_job_id or 'manual').replace('-', '_').replace(' ', '_')
+        return f"{job_prefix}_BLK_{self.block_id_counter:04d}"
 
     def _compute_sql_hash(self, sql):
         return hashlib.md5(sql.encode('utf-8')).hexdigest()[:16]

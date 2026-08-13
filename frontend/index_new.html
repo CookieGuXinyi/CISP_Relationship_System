@@ -401,21 +401,21 @@
                 </td>
                 <td style="color: #909399; font-size: 12px; max-width: 280px; word-break: break-all;">{{ item.full_expression || item.expression || '直接映射' }}</td>
                 <td v-if="showFilterCond" style="font-size: 11px; max-width: 280px; vertical-align: top;">
-                  <div v-if="parseFilterCond(item.filter_cond)">
-                    <div v-if="parseFilterCond(item.filter_cond).group_by && parseFilterCond(item.filter_cond).group_by.length" style="margin-bottom: 4px;">
+                  <div v-if="parseFilterCond(item)">
+                    <div v-if="parseFilterCond(item).group_by && parseFilterCond(item).group_by.length" style="margin-bottom: 4px;">
                       <span class="filter-cond-tag filter-cond-tag-group">GROUP BY</span>
-                      <span style="color: #606266;">{{ parseFilterCond(item.filter_cond).group_by.join(', ') }}</span>
+                      <span style="color: #606266;">{{ parseFilterCond(item).group_by.join(', ') }}</span>
                     </div>
-                    <div v-if="parseFilterCond(item.filter_cond).where" style="margin-bottom: 4px;">
+                    <div v-if="parseFilterCond(item).where" style="margin-bottom: 4px;">
                       <span class="filter-cond-tag filter-cond-tag-where">WHERE</span>
-                      <span style="color: #606266; word-break: break-all;">{{ parseFilterCond(item.filter_cond).where }}</span>
+                      <span style="color: #606266; word-break: break-all;">{{ parseFilterCond(item).where }}</span>
                     </div>
-                    <div v-if="parseFilterCond(item.filter_cond).having" style="margin-bottom: 4px;">
+                    <div v-if="parseFilterCond(item).having" style="margin-bottom: 4px;">
                       <span class="filter-cond-tag filter-cond-tag-having">HAVING</span>
-                      <span style="color: #606266; word-break: break-all;">{{ parseFilterCond(item.filter_cond).having }}</span>
+                      <span style="color: #606266; word-break: break-all;">{{ parseFilterCond(item).having }}</span>
                     </div>
-                    <div v-if="parseFilterCond(item.filter_cond).subquery_filters && parseFilterCond(item.filter_cond).subquery_filters.length">
-                      <div v-for="(sq, sqi) in parseFilterCond(item.filter_cond).subquery_filters" :key="sqi" style="margin-top: 6px; padding: 6px 8px; background: #fafafa; border-left: 3px solid #52c41a; border-radius: 3px;">
+                    <div v-if="parseFilterCond(item).subquery_filters && parseFilterCond(item).subquery_filters.length">
+                      <div v-for="(sq, sqi) in parseFilterCond(item).subquery_filters" :key="sqi" style="margin-top: 6px; padding: 6px 8px; background: #fafafa; border-left: 3px solid #52c41a; border-radius: 3px;">
                         <div style="font-weight: 600; color: #52c41a; margin-bottom: 3px; font-size: 12px;">📎 子查询 [{{ sq.alias }}]</div>
                         <div v-if="sq.group_by && sq.group_by.length" style="margin-bottom: 2px;">
                           <span class="filter-cond-tag filter-cond-tag-group">GROUP BY</span>
@@ -516,15 +516,34 @@
         updateTime();
 
         // ==================== filter_cond 解析 ====================
-        const filterCondCache = new Map();
-        const parseFilterCond = (condStr) => {
+        // 适配新数据库结构：group_by, having_cond, where_condition 为独立字段
+        const parseFilterCond = (item) => {
+          if (!item) return null;
+          
+          // 优先使用新格式的独立字段
+          const groupBy = item.group_by;
+          const havingCond = item.having_cond || item.having;
+          const whereCond = item.where_condition;
+          const isGrouped = item.is_grouped;
+          
+          // 如果有新格式数据，直接返回
+          if (groupBy || havingCond || whereCond) {
+            return {
+              group_by: groupBy ? (Array.isArray(groupBy) ? groupBy : groupBy.split(',')) : [],
+              where: whereCond || null,
+              having: havingCond || null,
+              subquery_filters: []
+            };
+          }
+          
+          // 兼容旧格式：filter_cond JSON 字符串
+          const condStr = item.filter_cond;
           if (!condStr) return null;
-          if (filterCondCache.has(condStr)) return filterCondCache.get(condStr);
-          let result = null;
+          
           try {
             const obj = typeof condStr === 'string' ? JSON.parse(condStr) : condStr;
             if (obj && (obj.group_by?.length || obj.where || obj.having || (obj.subquery_filters && obj.subquery_filters.length))) {
-              result = {
+              return {
                 group_by: Array.isArray(obj.group_by) ? obj.group_by : [],
                 where: obj.where || null,
                 having: obj.having || null,
@@ -532,10 +551,9 @@
               };
             }
           } catch (e) {
-            result = null;
+            // 解析失败
           }
-          filterCondCache.set(condStr, result);
-          return result;
+          return null;
         };
 
         // ==================== 解析SQL ====================

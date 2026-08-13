@@ -43,7 +43,7 @@ function parseAndStore(sqlText, jobName, reportCode, dialect) {
         const tmpFile = path.join(os.tmpdir(), `sql_${Date.now()}_${Math.random().toString(36).slice(2)}.sql`);
         fs.writeFileSync(tmpFile, sqlText, 'utf-8');
 
-        const pythonScript = path.join(__dirname, 'parse_sql_glot.py');
+        const pythonScript = path.join(__dirname, 'parse_sql_glot_new.py');
 
         exec(
             `python "${pythonScript}" "${tmpFile}" "${dialect || 'hive'}"`,
@@ -59,6 +59,8 @@ function parseAndStore(sqlText, jobName, reportCode, dialect) {
                 try { fs.unlinkSync(tmpFile); } catch (e) {}
 
                 if (error) {
+                    console.error(`[PARSE-ERROR] Python执行失败: ${error.message}`);
+                    if (stderr) console.error(`[PARSE-ERROR] stderr: ${stderr}`);
                     return reject({ error: 'SQL解析失败', detail: stderr || error.message });
                 }
 
@@ -111,6 +113,31 @@ function extractLineage(parsed, jobName, reportCode) {
         const sourceTable = item.source_table || item.source || null;
         const targetTable = item.target_table || item.target || 'UNKNOWN_TABLE';
         
+        // 解析 filter_cond JSON 字符串（如果存在）
+        let groupBy = item.group_by || null;
+        let havingCond = item.having_cond || item.having || null;
+        let whereCond = item.where_condition || null;
+        let isGrouped = item.is_grouped || false;
+        
+        // 如果有 filter_cond JSON 字符串，拆解它
+        if (item.filter_cond) {
+            try {
+                const cond = typeof item.filter_cond === 'string' ? JSON.parse(item.filter_cond) : item.filter_cond;
+                if (cond.group_by && cond.group_by.length) {
+                    groupBy = Array.isArray(cond.group_by) ? cond.group_by.join(', ') : cond.group_by;
+                    isGrouped = true;
+                }
+                if (cond.where) {
+                    whereCond = cond.where;
+                }
+                if (cond.having) {
+                    havingCond = cond.having;
+                }
+            } catch (e) {
+                // 解析失败则保留原始值
+            }
+        }
+        
         results.push({
             source_table: sourceTable,
             target_table: targetTable,
@@ -120,13 +147,12 @@ function extractLineage(parsed, jobName, reportCode) {
             full_expression: item.full_expression || item.expression || '直接映射',
             expression_type: item.expression_type || 'direct',
             source_role: item.source_role || 'direct',
-            filter_cond: item.filter_cond || null,
             agg_func: item.agg_func || null,
             has_distinct: item.has_distinct || false,
-            group_by: item.group_by || null,
-            having_cond: item.having_cond || null,
-            where_condition: item.where_condition || null,
-            is_grouped: item.is_grouped || false,
+            group_by: groupBy,
+            having_cond: havingCond,
+            where_condition: whereCond,
+            is_grouped: isGrouped,
             job_id: jobName || 'manual',
             report_code: reportCode || 'Y4',
             layer: inferLayer(targetTable)
@@ -195,10 +221,10 @@ function saveAllToDatabase(parsed, lineageData, jobId, reportCode, callback) {
             const stmt = db.prepare(`
                 INSERT INTO field_lineage 
                 (source_table, target_table, source_field, target_field, expression, 
-                 full_expression, expression_type, source_role, filter_cond,
+                 full_expression, expression_type, source_role,
                  agg_func, has_distinct, group_by, having_cond, where_condition, is_grouped,
-                 job_id, report_code, layer)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 job_id, report_code, layer, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             `);
 
             lineageData.forEach(row => {
@@ -211,7 +237,6 @@ function saveAllToDatabase(parsed, lineageData, jobId, reportCode, callback) {
                     row.full_expression || row.expression || '直接映射',
                     row.expression_type || 'direct',
                     row.source_role || 'direct',
-                    row.filter_cond || null,
                     row.agg_func || null,
                     row.has_distinct ? 1 : 0,
                     row.group_by || null,
@@ -343,8 +368,8 @@ function saveAllToDatabase(parsed, lineageData, jobId, reportCode, callback) {
             `);
 
             blocks.forEach(block => {
-                if (block.having_cond) {
-                    havingStmt.run(block.block_id, block.having_cond);
+                if (block.having) {
+                    havingStmt.run(block.block_id, block.having);
                 }
             });
             havingStmt.finalize();
@@ -389,8 +414,10 @@ app.post('/api/parse-sql', async (req, res) => {
 
     try {
         const result = await parseAndStore(sql, job_id, 'Y4', dialect);
+        console.log(`[API] /api/parse-sql 成功: ${result.summary?.column_lineage_count || 0} 条血缘, ${result.summary?.block_count || 0} 个Block`);
         res.json(result);
     } catch (e) {
+        console.error(`[API] /api/parse-sql 失败:`, e);
         res.status(500).json(e);
     }
 });
