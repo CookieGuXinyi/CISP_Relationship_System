@@ -46,7 +46,7 @@ function parseAndStore(sqlText, jobName, reportCode, dialect) {
         const pythonScript = path.join(__dirname, 'parse_sql_glot_new.py');
 
         exec(
-            `python "${pythonScript}" "${tmpFile}" "${dialect || 'hive'}"`,
+            `python "${pythonScript}" "${tmpFile}" "${dialect || 'hive'}" "${(jobName || 'manual').replace(/"/g, '\\"')}"`,
             {
                 maxBuffer: 10 * 1024 * 1024,
                 env: {
@@ -207,11 +207,32 @@ function saveAllToDatabase(parsed, lineageData, jobId, reportCode, callback) {
         // 开启事务
         db.run('BEGIN TRANSACTION');
 
-        // 1. 删除该job的旧数据
+        // 1. 删除该job的旧数据（必须先删子表，再删主表，避免孤儿记录残留）
         db.run('DELETE FROM field_lineage WHERE job_id = ?', [jobId], (err) => {
             if (err) { db.run('ROLLBACK'); return callback(err); }
         });
 
+        // 先删除所有子表中引用旧block_id的记录（通过job_id关联）
+        db.run('DELETE FROM lineage_block_column WHERE block_id IN (SELECT block_id FROM lineage_block WHERE job_id = ?)', [jobId], (err) => {
+            if (err) { db.run('ROLLBACK'); return callback(err); }
+        });
+        db.run('DELETE FROM lineage_block_join WHERE block_id IN (SELECT block_id FROM lineage_block WHERE job_id = ?)', [jobId], (err) => {
+            if (err) { db.run('ROLLBACK'); return callback(err); }
+        });
+        db.run('DELETE FROM lineage_block_where WHERE block_id IN (SELECT block_id FROM lineage_block WHERE job_id = ?)', [jobId], (err) => {
+            if (err) { db.run('ROLLBACK'); return callback(err); }
+        });
+        db.run('DELETE FROM lineage_block_group_by WHERE block_id IN (SELECT block_id FROM lineage_block WHERE job_id = ?)', [jobId], (err) => {
+            if (err) { db.run('ROLLBACK'); return callback(err); }
+        });
+        db.run('DELETE FROM lineage_block_having WHERE block_id IN (SELECT block_id FROM lineage_block WHERE job_id = ?)', [jobId], (err) => {
+            if (err) { db.run('ROLLBACK'); return callback(err); }
+        });
+        db.run('DELETE FROM lineage_block_union WHERE parent_block_id IN (SELECT block_id FROM lineage_block WHERE job_id = ?) OR child_block_id IN (SELECT block_id FROM lineage_block WHERE job_id = ?)', [jobId], (err) => {
+            if (err) { db.run('ROLLBACK'); return callback(err); }
+        });
+
+        // 最后删除lineage_block主表
         db.run('DELETE FROM lineage_block WHERE job_id = ?', [jobId], (err) => {
             if (err) { db.run('ROLLBACK'); return callback(err); }
         });
@@ -243,7 +264,7 @@ function saveAllToDatabase(parsed, lineageData, jobId, reportCode, callback) {
                     row.having_cond || null,
                     row.where_condition || null,
                     row.is_grouped ? 1 : 0,
-                    row.job_id || jobId || 'manual',
+                    jobId || row.job_id || 'manual',
                     row.report_code || reportCode || 'Y4',
                     row.layer || 'UNKNOWN'
                 );
@@ -272,7 +293,7 @@ function saveAllToDatabase(parsed, lineageData, jobId, reportCode, callback) {
                     block.from_table || null,
                     block.from_alias || null,
                     block.sql_hash || null,
-                    block.job_id || jobId || 'manual',
+                    jobId || block.job_id || 'manual',
                     block.period || null
                 );
             });

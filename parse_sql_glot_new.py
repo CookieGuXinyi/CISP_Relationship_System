@@ -103,6 +103,9 @@ class SQLBloodlineParser:
             # 批量写入剩余数据
             if store_to_db and self.db_path:
                 self._flush_buffer()
+                # 写入字段级血缘（field_lineage），过滤未解析别名
+                if self.column_lineage:
+                    self._write_compat_lineage_to_db()
 
             # 返回结果
             return self._build_result()
@@ -116,7 +119,6 @@ class SQLBloodlineParser:
     # ==================== 核心解析 ====================
 
     def _parse_statement(self, parsed, original_sql=None):
-        self._collect_alias_map(parsed)
         self._extract_target_tables(parsed)
         self._extract_source_tables(parsed)
 
@@ -127,6 +129,8 @@ class SQLBloodlineParser:
         except Exception as e:
             print(f"⚠️ qualify失败: {e}", file=sys.stderr)
 
+        # qualify之后重新收集别名映射，确保别名解析基于规范化后的AST
+        self._collect_alias_map(tree)
         self._build_column_alias_map(tree)
 
         for insert in tree.find_all(exp.Insert):
@@ -154,10 +158,12 @@ class SQLBloodlineParser:
         if isinstance(node, exp.Union):
             left_block = self._extract_blocks(node.left, target_table, statement_type, parent_block_id)
             right_block = self._extract_blocks(node.right, target_table, statement_type, parent_block_id)
-            return self._create_union_block(left_block, right_block, target_table, statement_type)
+            return self._create_union_block(left_block, right_block, target_table, statement_type, parent_block_id)
 
         if isinstance(node, exp.Subquery):
-            return self._extract_blocks(node.this, target_table, statement_type, parent_block_id)
+            # 子查询 Block 不继承父级 target_table，使用 None
+            # 同时将父级 block_id 作为子查询的 parent_block_id
+            return self._extract_blocks(node.this, None, 'SUBQUERY', parent_block_id)
 
         if isinstance(node, exp.Select):
             return self._extract_select_block(node, target_table, statement_type, parent_block_id)
@@ -168,13 +174,12 @@ class SQLBloodlineParser:
         block_id = self._next_block_id()
 
         # 先创建block骨架并入列表，确保子查询能引用parent_block_id
-        # 为子查询block生成虚拟target_table标识
-        virtual_target_table = target_table if target_table else f"SUBQUERY_TARGET_{block_id}"
+        # 子查询Block的 target_table 使用 None，不再生成合成名
         block = {
             "block_id": block_id,
             "parent_block_id": parent_block_id,
             "block_type": "SELECT",
-            "target_table": virtual_target_table,
+            "target_table": target_table,  # 子查询传入 None，顶层传入实际表名
             "statement_type": statement_type,
             "from_table": None,
             "from_alias": None,
@@ -243,8 +248,8 @@ class SQLBloodlineParser:
         block["group_by"] = group_by
         block["having"] = having
 
-        # 生成包含筛选条件的兼容 column_lineage
-        self._extract_columns_from_select_with_filters(select, virtual_target_table, group_by, where_conditions, having)
+        # 生成包含筛选条件的兼容 column_lineage（使用实际 target_table）
+        self._extract_columns_from_select_with_filters(select, target_table, group_by, where_conditions, having)
 
         # 如果开启了数据库存储，立即写入
         if self.db_path:
@@ -268,16 +273,16 @@ class SQLBloodlineParser:
         # 收集到缓存
         self._block_buffer.append((
             block["block_id"],
-            None,  # parent_block_id
-            block["block_type"],
-            block["target_table"],
-            block["statement_type"],
-            block["from_table"],
-            block["from_alias"],
-            block["sql_hash"],
-            block["job_id"],
-            block["period"],
-            block["created_at"]
+            block.get("parent_block_id"),  # 修复：不再硬编码 None
+            block.get("block_type", "SELECT"),
+            block.get("target_table"),
+            block.get("statement_type"),
+            block.get("from_table"),
+            block.get("from_alias"),
+            block.get("sql_hash"),
+            block.get("job_id", self._current_job_id),
+            block.get("period", self._current_period),
+            block.get("created_at")
         ))
 
         # 字段列
@@ -400,15 +405,34 @@ class SQLBloodlineParser:
                 self._conn.rollback()
 
     def _write_compat_lineage_to_db(self):
-        """将兼容的column_lineage写入field_lineage表"""
+        """将兼容的column_lineage写入field_lineage表（过滤未解析别名）"""
         if not self._cursor or not self.column_lineage:
             return
 
         batch = []
+        skipped = 0
         for cl in self.column_lineage:
+            source_table = cl.get("source_table")
+            target_table = cl.get("target_table")
+
+            # 过滤：源表未解析为物理表（仍是别名）
+            if not source_table or self._is_unresolved_alias(source_table):
+                skipped += 1
+                continue
+
+            # 过滤：目标表是子查询合成名
+            if target_table and ('__SUBQUERY__' in target_table or 'SUBQUERY_TARGET_' in target_table):
+                skipped += 1
+                continue
+
+            # 过滤：源表==目标表（同表内计算，无跨表血缘）
+            if source_table == target_table:
+                skipped += 1
+                continue
+
             batch.append((
-                cl.get("source_table"),
-                cl.get("target_table"),
+                source_table,
+                target_table,
                 cl.get("source_column"),
                 cl.get("target_column"),
                 cl.get("expression"),
@@ -420,11 +444,17 @@ class SQLBloodlineParser:
                 cl.get("layer", "UNKNOWN"),
                 cl.get("agg_func"),
                 1 if cl.get("has_distinct") else 0,
-                cl.get("group_by"),  # 直接使用字符串
-                cl.get("having_cond") or cl.get("having"),  # having_cond 兼容 having
+                cl.get("group_by"),
+                cl.get("having_cond") or cl.get("having"),
                 cl.get("where_condition"),
                 1 if cl.get("is_grouped") else 0
             ))
+
+        if skipped > 0:
+            print(f"ℹ️ 过滤掉 {skipped} 条未解析别名/子查询合成名的血缘记录", file=sys.stderr)
+
+        if not batch:
+            return
 
         self._cursor.executemany("""
             INSERT OR REPLACE INTO field_lineage
@@ -456,23 +486,58 @@ class SQLBloodlineParser:
                     self._clean_expression(expr.this.sql()), expr.this
                 )
                 for col in source_cols:
-                    self.column_lineage.append({
-                        "source_table": col.get('table'),
-                        "source_column": col.get('column'),
-                        "target_table": target_table,
-                        "target_column": alias,
-                        "expression": self._get_simplified_expression(expr.this),
-                        "full_expression": self._clean_expression(expr.this.sql()),
-                        "expression_type": expr_type,
-                        "source_role": col.get('role', 'direct'),
-                        "agg_func": expr.this.__class__.__name__.lower() if isinstance(expr.this, exp.AggFunc) else None,
-                        "has_distinct": self._has_distinct(expr.this),
-                        "job_id": self._current_job_id,
-                        "layer": self._infer_layer(target_table)
-                    })
+                    # 递归穿透别名到物理表
+                    physical_table = self._resolve_to_physical_table(
+                        col.get('table'), col.get('column')
+                    )
+                    if not physical_table:
+                        physical_table = col.get('table')
+                    # 跳过未解析的别名（无.且在alias_map中存在的）
+                    if physical_table and not self._is_unresolved_alias(physical_table):
+                        # 过滤自引用（源表==目标表）
+                        if physical_table == target_table:
+                            continue
+                        self.column_lineage.append({
+                            "source_table": physical_table,
+                            "source_column": col.get('column'),
+                            "target_table": target_table,
+                            "target_column": alias,
+                            "expression": self._get_simplified_expression(expr.this),
+                            "full_expression": self._clean_expression(expr.this.sql()),
+                            "expression_type": expr_type,
+                            "source_role": col.get('role', 'direct'),
+                            "agg_func": expr.this.__class__.__name__.lower() if isinstance(expr.this, exp.AggFunc) else None,
+                            "has_distinct": self._has_distinct(expr.this),
+                            "job_id": self._current_job_id,
+                            "layer": self._infer_layer(target_table)
+                        })
+
+    def _is_unresolved_alias(self, table_name):
+        """判断表名是否是未解析的别名（不含.且在alias_map中作为key存在）"""
+        if not table_name:
+            return True
+        # 含.说明是物理表（含schema前缀）
+        if '.' in table_name:
+            return False
+        # 不含.且在alias_map中作为key → 可能是别名
+        # 但也可能是非schema表名，需要进一步判断
+        key = table_name.lower()
+        if key in self.alias_map:
+            # 如果alias_map[key] != key 说明是别名
+            mapped = self.alias_map[key]
+            if mapped and mapped.lower() != key:
+                return True
+        # 如果在column_alias_map中，也是子查询别名
+        if key in self.column_alias_map:
+            return True
+        return False
 
     def _extract_columns_from_select_with_filters(self, select, target_table, group_by, where_conditions, having):
         """生成包含筛选条件的兼容 column_lineage 记录"""
+        # 子查询Block没有target_table，跳过生成column_lineage（避免中间表污染）
+        if not target_table:
+            return
+
         # 构建 filter_cond JSON
         filter_cond = {}
         if group_by:
@@ -484,11 +549,6 @@ class SQLBloodlineParser:
         
         is_grouped = bool(group_by)
 
-        # 为子查询block生成虚拟target_table标识（避免UNKNOWN_TABLE）
-        effective_target = target_table
-        if not effective_target:
-            effective_target = f"__SUBQUERY__"
-
         for expr in select.expressions:
             inner_expr = expr.this if isinstance(expr, exp.Alias) else expr
             alias = expr.alias_or_name if isinstance(expr, exp.Alias) else (expr.name if isinstance(expr, exp.Column) else None)
@@ -499,26 +559,37 @@ class SQLBloodlineParser:
                 self._clean_expression(inner_expr.sql()), inner_expr
             )
             for col in source_cols:
-                self.column_lineage.append({
-                    "source_table": col.get('table'),
-                    "source_column": col.get('column'),
-                    "target_table": effective_target,
-                    "target_column": alias,
-                    "expression": self._get_simplified_expression(inner_expr),
-                    "full_expression": self._clean_expression(inner_expr.sql()),
-                    "expression_type": expr_type,
-                    "source_role": col.get('role', 'direct'),
-                    "agg_func": inner_expr.__class__.__name__.lower() if isinstance(inner_expr, exp.AggFunc) else None,
-                    "has_distinct": self._has_distinct(inner_expr),
-                    "job_id": self._current_job_id,
-                    "layer": self._infer_layer(effective_target),
-                    # 新增筛选条件字段
-                    "filter_cond": json.dumps(filter_cond) if filter_cond else None,
-                    "group_by": ', '.join(group_by) if group_by else None,
-                    "having_cond": having,
-                    "where_condition": filter_cond.get('where'),
-                    "is_grouped": is_grouped
-                })
+                # 递归穿透别名到物理表
+                physical_table = self._resolve_to_physical_table(
+                    col.get('table'), col.get('column')
+                )
+                if not physical_table:
+                    physical_table = col.get('table')
+                # 跳过未解析的别名
+                if physical_table and not self._is_unresolved_alias(physical_table):
+                    # ★ 过滤自引用（源表==目标表）
+                    if physical_table == target_table:
+                        continue
+                    self.column_lineage.append({
+                        "source_table": physical_table,
+                        "source_column": col.get('column'),
+                        "target_table": target_table,
+                        "target_column": alias,
+                        "expression": self._get_simplified_expression(inner_expr),
+                        "full_expression": self._clean_expression(inner_expr.sql()),
+                        "expression_type": expr_type,
+                        "source_role": col.get('role', 'direct'),
+                        "agg_func": inner_expr.__class__.__name__.lower() if isinstance(inner_expr, exp.AggFunc) else None,
+                        "has_distinct": self._has_distinct(inner_expr),
+                        "job_id": self._current_job_id,
+                        "layer": self._infer_layer(target_table),
+                        # 新增筛选条件字段
+                        "filter_cond": json.dumps(filter_cond) if filter_cond else None,
+                        "group_by": ', '.join(group_by) if group_by else None,
+                        "having_cond": having,
+                        "where_condition": filter_cond.get('where'),
+                        "is_grouped": is_grouped
+                    })
 
     def _has_distinct(self, expr):
         if not isinstance(expr, exp.AggFunc):
@@ -579,22 +650,42 @@ class SQLBloodlineParser:
                 if table_lower in self.column_alias_map:
                     sq_cols = self.column_alias_map[table_lower]
                     col_lower = expr.name.lower()
+                    # 精确匹配优先
+                    matched_key = None
                     if col_lower in sq_cols:
-                        for src in sq_cols[col_lower]['source_columns']:
+                        matched_key = col_lower
+                    else:
+                        # 模糊匹配：去除qualify可能添加的后缀
+                        for key in sq_cols:
+                            if key.startswith('__'):
+                                continue
+                            if col_lower == key:
+                                matched_key = key
+                                break
+                            # 匹配: d4_01_lm -> d4_01
+                            if col_lower.endswith('_' + key) or key.endswith('_' + col_lower):
+                                matched_key = key
+                                break
+                    if matched_key:
+                        for src in sq_cols[matched_key]['source_columns']:
+                            inner_col = src.get('column')
+                            physical_tbl = self._resolve_to_physical_table(src.get('table'), inner_col)
+                            # ★ 关键修复：source_column始终使用外层表达式的列名
                             results.append({
-                                "table": src.get('table'),
-                                "column": src.get('column'),
+                                "table": physical_tbl or src.get('table'),
+                                "column": expr.name,
                                 "expression": self._clean_expression(expr.sql()),
                                 "role": src.get('role', role)
                             })
                         return results
-            resolved_table = self._resolve_column_table(table_name)
-            results.append({
-                "table": resolved_table,
-                "column": expr.name,
-                "expression": self._clean_expression(expr.sql()),
-                "role": role
-            })
+                # 使用 _resolve_to_physical_table 递归穿透子查询别名
+                resolved_table = self._resolve_to_physical_table(table_name, expr.name)
+                results.append({
+                    "table": resolved_table or table_name,
+                    "column": expr.name,
+                    "expression": self._clean_expression(expr.sql()),
+                    "role": role
+                })
         elif isinstance(expr, exp.AggFunc):
             for arg in expr.args.get('expressions', []):
                 results.extend(self._find_source_columns(arg, scoped_aliases, 'data_source'))
@@ -614,6 +705,11 @@ class SQLBloodlineParser:
             default_val = expr.args.get('default')
             if default_val is not None:
                 results.extend(self._find_source_columns(default_val, scoped_aliases, 'data_source'))
+        elif isinstance(expr, exp.If):
+            # hive 的 if(cond, true, false) 函数
+            results.extend(self._find_source_columns(expr.args.get('this'), scoped_aliases, 'filter'))
+            results.extend(self._find_source_columns(expr.args.get('true'), scoped_aliases, 'data_source'))
+            results.extend(self._find_source_columns(expr.args.get('false'), scoped_aliases, 'data_source'))
         elif isinstance(expr, exp.Binary):
             results.extend(self._find_source_columns(expr.this, scoped_aliases, role))
             if expr.args.get('expression'):
@@ -622,6 +718,13 @@ class SQLBloodlineParser:
             for arg in expr.args.get('expressions', []):
                 results.extend(self._find_source_columns(arg, scoped_aliases, role))
             if hasattr(expr, 'this') and expr.this:
+                results.extend(self._find_source_columns(expr.this, scoped_aliases, role))
+        elif isinstance(expr, exp.Paren):
+            results.extend(self._find_source_columns(expr.this, scoped_aliases, role))
+        elif isinstance(expr, exp.Distinct):
+            for arg in expr.args.get('expressions', []):
+                results.extend(self._find_source_columns(arg, scoped_aliases, role))
+            if expr.this:
                 results.extend(self._find_source_columns(expr.this, scoped_aliases, role))
         return results
 
@@ -692,6 +795,104 @@ class SQLBloodlineParser:
             if isinstance(current, str):
                 current = current.lower()
         return self.alias_map.get(current, name)
+
+    def _resolve_to_physical_table(self, alias_name, column_name=None):
+        """
+        递归将别名解析为物理表名。
+        支持三层穿透：
+        1) alias_map 直接映射：x → trcif.cif_lborganization
+        2) column_alias_map 子查询穿透：lm → (子查询内的物理表)
+        3) 循环引用检测
+
+        Args:
+            alias_name: 表别名（如 'x', 'lm', 'cm'）
+            column_name: 列名（可选，用于在子查询内查找对应源列）
+
+        Returns:
+            物理表名字符串，或 None（无法解析时）
+        """
+        if not alias_name:
+            return None
+
+        visited = set()
+        current = alias_name.lower()
+
+        # 循环引用保护
+        max_depth = 10
+        depth = 0
+
+        while current and depth < max_depth:
+            depth += 1
+            if current in visited:
+                return None  # 循环引用
+            visited.add(current)
+
+            # 1) 先查 alias_map（直接别名 → 物理表）
+            if current in self.alias_map:
+                resolved = self.alias_map[current]
+                if isinstance(resolved, str):
+                    resolved_lower = resolved.lower()
+                    # 如果解析结果还是别名（非物理表，不含.），继续追溯
+                    if resolved_lower in self.alias_map:
+                        current = resolved_lower
+                        continue
+                    # 如果是子查询别名（在 column_alias_map 中），也需要穿透
+                    if resolved_lower in self.column_alias_map:
+                        current = resolved_lower
+                        continue
+                    # 真正的物理表（含.或无别名映射）
+                    return resolved
+                return str(resolved)
+
+            # 2) 查 column_alias_map（子查询别名 → 底层物理表）
+            if current in self.column_alias_map:
+                sq_info = self.column_alias_map[current]
+                # 优先从列映射中找源表
+                if column_name and column_name.lower() in sq_info:
+                    col_info = sq_info[column_name.lower()]
+                    src_tables = col_info.get('source_columns', [])
+                    if src_tables:
+                        # 用第一个源表继续追溯（可能仍是别名）
+                        first_table = src_tables[0].get('table')
+                        if first_table:
+                            # 递归追溯
+                            deep = self._resolve_to_physical_table(first_table, None)
+                            if deep:
+                                return deep
+                            return first_table  # 无法再追溯就返回当前
+                # 从子查询的表别名映射中找物理表
+                table_aliases = sq_info.get('__table_aliases__', {})
+                if table_aliases:
+                    for alias_key, physical_table in table_aliases.items():
+                        # 递归追溯
+                        deep = self._resolve_to_physical_table(physical_table, None)
+                        if deep:
+                            return deep
+                        return physical_table
+                # 子查询中有 source_columns 列表
+                for col_key, col_info in sq_info.items():
+                    if col_key.startswith('__'):
+                        continue
+                    src_tables = col_info.get('source_columns', [])
+                    for src in src_tables:
+                        tbl = src.get('table')
+                        if tbl:
+                            deep = self._resolve_to_physical_table(tbl, None)
+                            if deep:
+                                return deep
+                            return tbl
+                # 兜底：返回子查询别名本身（标记为未解析）
+                return None
+
+            # 3) 不是任何已知别名，可能已经是物理表
+            # 检查是否含.（物理表通常有schema前缀）
+            if '.' in alias_name or '.' in current:
+                return alias_name if '.' in alias_name else current
+
+            # 无法解析
+            return None
+
+        return None  # 超过最大深度
 
     def _clean_expression(self, sql_str):
         return re.sub(r'"([^"]*)"', r'\1', sql_str) if sql_str else sql_str
@@ -777,17 +978,25 @@ class SQLBloodlineParser:
                     result["has_distinct"] = True
                     for de in arg.args.get('expressions', []):
                         if isinstance(de, exp.Column):
-                            tbl = self._resolve_column_table(self._extract_table_from_column(de))
-                            result["source_tables"].append(tbl)
+                            tbl = self._resolve_to_physical_table(
+                                self._extract_table_from_column(de), de.name
+                            )
+                            if tbl:
+                                result["source_tables"].append(tbl)
                             result["source"] = de.name if not result["source"] else result["source"]
                 elif isinstance(arg, exp.Column):
-                    tbl = self._resolve_column_table(self._extract_table_from_column(arg))
-                    result["source_tables"].append(tbl)
+                    tbl = self._resolve_to_physical_table(
+                        self._extract_table_from_column(arg), arg.name
+                    )
+                    if tbl:
+                        result["source_tables"].append(tbl)
                     result["source"] = arg.name
             if not result["source_tables"] and hasattr(expr, 'this') and expr.this:
                 src_cols = self._find_source_columns(expr.this)
                 for sc in src_cols:
-                    result["source_tables"].append(sc.get('table'))
+                    pt = self._resolve_to_physical_table(sc.get('table'), sc.get('column'))
+                    if pt:
+                        result["source_tables"].append(pt)
                     if sc.get('column') and not result["source"]:
                         result["source"] = sc.get('column')
         elif isinstance(expr, exp.Case):
@@ -795,11 +1004,15 @@ class SQLBloodlineParser:
             src_cols = self._find_source_columns(expr)
             cols = []
             for sc in src_cols:
+                pt = self._resolve_to_physical_table(sc.get('table'), sc.get('column'))
+                if pt:
+                    result["source_tables"].append(pt)
                 cols.append(sc.get('column'))
-                result["source_tables"].append(sc.get('table'))
             result["source"] = ', '.join(dict.fromkeys([c for c in cols if c])) if cols else 'CASE_WHEN'
         elif isinstance(expr, exp.Column):
-            tbl = self._resolve_column_table(self._extract_table_from_column(expr))
+            tbl = self._resolve_to_physical_table(
+                self._extract_table_from_column(expr), expr.name
+            )
             result["source"] = expr.name
             result["source_table"] = tbl
             result["source_tables"] = [tbl] if tbl else []
@@ -809,32 +1022,40 @@ class SQLBloodlineParser:
             src_cols = self._find_source_columns(expr)
             cols = []
             for sc in src_cols:
+                pt = self._resolve_to_physical_table(sc.get('table'), sc.get('column'))
+                if pt:
+                    result["source_tables"].append(pt)
                 cols.append(sc.get('column'))
-                result["source_tables"].append(sc.get('table'))
             result["source"] = ', '.join(dict.fromkeys([c for c in cols if c])) if cols else None
         elif isinstance(expr, exp.Func):
             result["expression_type"] = 'function'
             src_cols = self._find_source_columns(expr)
             cols = []
             for sc in src_cols:
+                pt = self._resolve_to_physical_table(sc.get('table'), sc.get('column'))
+                if pt:
+                    result["source_tables"].append(pt)
                 cols.append(sc.get('column'))
-                result["source_tables"].append(sc.get('table'))
             result["source"] = ', '.join(dict.fromkeys([c for c in cols if c])) if cols else None
         else:
             src_cols = self._find_source_columns(expr)
             cols = []
             for sc in src_cols:
+                pt = self._resolve_to_physical_table(sc.get('table'), sc.get('column'))
+                if pt:
+                    result["source_tables"].append(pt)
                 cols.append(sc.get('column'))
-                result["source_tables"].append(sc.get('table'))
             if cols:
                 result["source"] = ', '.join(dict.fromkeys([c for c in cols if c]))
+        # 去重 + 过滤 None
         result["source_tables"] = list(dict.fromkeys([t for t in result["source_tables"] if t]))
         result["source_table"] = result["source_tables"][0] if result["source_tables"] else result["source_table"]
         return result
 
-    def _create_union_block(self, left_block, right_block, target_table, statement_type):
+    def _create_union_block(self, left_block, right_block, target_table, statement_type, parent_block_id=None):
         block = {
             "block_id": self._next_block_id(),
+            "parent_block_id": parent_block_id,
             "block_type": "UNION",
             "target_table": target_table,
             "statement_type": statement_type,
@@ -1191,10 +1412,11 @@ def main():
 
     file_path = sys.argv[1]
     dialect = sys.argv[2] if len(sys.argv) > 2 else 'hive'
-    db_path = sys.argv[3] if len(sys.argv) > 3 else None
+    job_id = sys.argv[3] if len(sys.argv) > 3 else None
+    db_path = sys.argv[4] if len(sys.argv) > 4 else None
 
     parser = SQLBloodlineParser(dialect=dialect, db_path=db_path)
-    result = parser.parse_sql_from_file(file_path, store_to_db=bool(db_path))
+    result = parser.parse_sql_from_file(file_path, job_id=job_id, store_to_db=bool(db_path))
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
